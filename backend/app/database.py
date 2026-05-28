@@ -3,7 +3,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.engine import URL
 import re
 
-from app.config import settings
+from app.core.config import settings
 
 # Clean up DATABASE_URL to remove invalid PostgreSQL parameters
 # Railway sometimes sets "timeout" which psycopg2 doesn't support
