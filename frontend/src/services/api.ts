@@ -128,16 +128,11 @@ export function isAdmin(): boolean {
 }
 
 export function loginWithGitHub(): void {
-  const redirectUri = `${window.location.origin}/auth/callback`
-  const clientId = import.meta.env.VITE_GITHUB_CLIENT_ID || 'YOUR_GITHUB_CLIENT_ID'
-  const scopes = ['user:email', 'read:user']
-
-  const authUrl = new URL('https://github.com/login/oauth/authorize')
-  authUrl.searchParams.append('client_id', clientId)
-  authUrl.searchParams.append('redirect_uri', redirectUri)
-  authUrl.searchParams.append('scope', scopes.join(' '))
-
-  window.location.href = authUrl.toString()
+  // Kick off the OAuth flow on the backend. The backend holds the client secret,
+  // exchanges the code, creates/loads the user account, and redirects back to
+  // /auth/callback#auth=<session> which AgentsPage picks up on mount.
+  const apiBase = import.meta.env.VITE_API_URL || '/api/v1'
+  window.location.href = `${apiBase}/auth/login`
 }
 
 // Registry API

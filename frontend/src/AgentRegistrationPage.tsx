@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { CheckCircle2, AlertCircle, Copy, Zap, Bot, ChevronRight, Loader2, X, Terminal } from 'lucide-react'
 import UserMenu from './components/UserMenu'
 import NotificationBell from './components/NotificationBell'
+import { getStoredAuth } from './services/api'
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api/v1'
 
@@ -120,10 +121,11 @@ export default function AgentRegistrationPage() {
         'Content-Type': 'application/json',
       }
 
-      // If user is logged in, send their token (optional)
-      const token = localStorage.getItem('chekk_gh_token')
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`
+      // If the user is logged in, send their session token so the registration
+      // token (and the agent it provisions) is linked to their account.
+      const auth = getStoredAuth()
+      if (auth?.token) {
+        headers['Authorization'] = `Bearer ${auth.token}`
       }
 
       const response = await fetch(`${API_BASE}/gateway/agents/registration-token`, {
