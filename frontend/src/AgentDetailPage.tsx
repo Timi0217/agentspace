@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { ArrowLeft, Loader2, ExternalLink, Clock, Activity, Zap } from 'lucide-react'
-import { registryAPI, RegistryAgent } from '../services/api'
+import { registryAPI, RegistryAgent } from './services/api'
 
 export default function AgentDetailPage() {
   const { handle } = useParams<{ handle: string }>()

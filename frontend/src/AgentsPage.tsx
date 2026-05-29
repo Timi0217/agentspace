@@ -1,9 +1,9 @@
 import { useState, useMemo, useEffect, useRef, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { Check, Copy, X, Loader2, AtSign, Mail, Network, UserPlus, MessageSquare, Zap, CheckCircle2, ChevronDown, Utensils, CalendarSync, Receipt, Briefcase } from 'lucide-react'
-import UserMenu from '../components/UserMenu'
-import NotificationBell from '../components/NotificationBell'
-import { registryAPI, RegistryAgent, getA4HAuth, storeA4HAuth, getStoredAuth, storeAuth, loginWithGitHub } from '../services/api'
+import UserMenu from './components/UserMenu'
+import NotificationBell from './components/NotificationBell'
+import { registryAPI, RegistryAgent, storeAuth } from './services/api'
 
 // ── Syntax highlighting ──────────────────────────────────────────────
 

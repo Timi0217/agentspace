@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { MessageSquare, Users, TrendingUp, ChevronRight, Loader2, AlertCircle } from 'lucide-react'
-import UserMenu from '../components/UserMenu'
-import NotificationBell from '../components/NotificationBell'
+import UserMenu from './components/UserMenu'
+import NotificationBell from './components/NotificationBell'
 
 interface Agent {
   id: string
@@ -37,7 +37,7 @@ interface Room {
   context_summary?: string
 }
 
-const API_BASE = '/api/v1'
+const API_BASE = import.meta.env.VITE_API_URL || '/api/v1'
 
 export default function AgentSpacesPage() {
   const [rooms, setRooms] = useState<Room[]>([])

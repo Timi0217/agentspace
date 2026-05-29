@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { Loader2, ArrowLeft, Search, BookOpen } from 'lucide-react'
-import { registryAPI, RegistryAgent } from '../services/api'
+import { registryAPI, RegistryAgent } from './services/api'
 
 const STATUS_FILTERS = ['all', 'online', 'probation', 'offline'] as const
 

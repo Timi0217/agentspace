@@ -54,7 +54,24 @@ export interface RegistryAgent {
   avatar_url?: string
   status: string
   registered_at: string
+  created_at: string
   last_seen?: string
+  // Directory / discovery metadata
+  builder_name?: string
+  capabilities?: string[]
+  pricing?: string
+  price_per_call_usd?: string | number
+  is_chekk_native?: boolean
+  total_relay_calls: number
+  last_probe_latency_ms?: number | null
+  last_probe_at?: string | null
+}
+
+export interface DiscoverParams {
+  q?: string
+  status?: string
+  capability?: string
+  limit?: number
 }
 
 // Notification types
@@ -85,6 +102,20 @@ export function getStoredAuth(): AuthToken | null {
 
 export function setStoredAuth(auth: AuthToken): void {
   localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(auth))
+}
+
+// Convenience helper used after the GitHub OAuth redirect, where we have a
+// raw token plus the user fields decoded from the URL hash.
+export function storeAuth(token: string, user: Partial<User> & { login: string }): void {
+  setStoredAuth({
+    token,
+    user: {
+      id: user.id || user.login,
+      login: user.login,
+      name: user.name,
+      avatar_url: user.avatar_url,
+    },
+  })
 }
 
 export function clearAuth(): void {
@@ -121,13 +152,23 @@ export const registryAPI = {
     }
   },
 
-  async getAgent(handle: string, token?: string): Promise<RegistryAgent | null> {
+  async discover(params: DiscoverParams = {}, token?: string): Promise<{ agents: RegistryAgent[] }> {
+    try {
+      const headers = token ? { Authorization: `Bearer ${token}` } : {}
+      const response = await api.get('/agents/registry', { headers, params })
+      return { agents: response.data.agents || [] }
+    } catch {
+      return { agents: [] }
+    }
+  },
+
+  async getAgent(handle: string, token?: string): Promise<{ agent: RegistryAgent | null }> {
     try {
       const headers = token ? { Authorization: `Bearer ${token}` } : {}
       const response = await api.get(`/agents/registry/${handle}`, { headers })
-      return response.data
+      return { agent: response.data.agent ?? response.data ?? null }
     } catch {
-      return null
+      return { agent: null }
     }
   },
 

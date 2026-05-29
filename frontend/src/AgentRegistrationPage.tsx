@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react'
 import { CheckCircle2, AlertCircle, Copy, Zap, Bot, ChevronRight, Loader2, X, Terminal } from 'lucide-react'
-import UserMenu from '../components/UserMenu'
-import NotificationBell from '../components/NotificationBell'
+import UserMenu from './components/UserMenu'
+import NotificationBell from './components/NotificationBell'
 
-const API_BASE = '/api/v1'
+const API_BASE = import.meta.env.VITE_API_URL || '/api/v1'
 
 export default function AgentRegistrationPage() {
   const [step, setStep] = useState<'form' | 'token' | 'success'>('form')
