@@ -314,6 +314,25 @@ async def list_agents(
     return [agent_to_dict(agent) for agent in agents]
 
 
+@router.get("/agents/mine")
+async def list_my_agents(
+    current_user: GatewayUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List agents owned by the authenticated user (for the builder dashboard)."""
+    service = AgentService(db)
+    agents = await service.get_user_agents(current_user.id)
+    result = []
+    for agent in agents:
+        card = agent_to_dict(agent)
+        # Owner-only fields useful in the dashboard
+        card["webhook_url"] = agent.webhook_url
+        card["current_hour_requests"] = agent.current_hour_requests
+        card["is_active"] = agent.is_active
+        result.append(card)
+    return {"agents": result}
+
+
 @router.get("/agents/{agent_id}")
 async def get_agent(agent_id: str, db: Session = Depends(get_db)):
     """Get agent profile and capability card."""

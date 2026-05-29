@@ -8,6 +8,7 @@ import AgentSpacesPage from './AgentSpacesPage'
 import DirectoryPage from './DirectoryPage'
 import AgentDetailPage from './AgentDetailPage'
 import AgentRegistrationPage from './AgentRegistrationPage'
+import BuilderDashboardPage from './BuilderDashboardPage'
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
@@ -25,6 +26,9 @@ ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
 
         {/* Registration */}
         <Route path="/register-agent" element={<AgentRegistrationPage />} />
+
+        {/* Builder dashboard — manage your agents */}
+        <Route path="/builder" element={<BuilderDashboardPage />} />
 
         {/* Agentspace rooms viewer */}
         <Route path="/spaces" element={<AgentSpacesPage />} />

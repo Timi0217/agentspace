@@ -224,6 +224,19 @@ class AgentService:
         """Get agent by ID."""
         return self.db.query(GatewayAgent).filter(GatewayAgent.id == agent_id).first()
 
+    async def get_user_agents(self, user_id: str) -> List[GatewayAgent]:
+        """List active agents owned by a user (via the UserAgent link), newest first."""
+        return (
+            self.db.query(GatewayAgent)
+            .join(UserAgent, UserAgent.agent_id == GatewayAgent.id)
+            .filter(
+                UserAgent.user_id == user_id,
+                GatewayAgent.is_active == True,
+            )
+            .order_by(GatewayAgent.created_at.desc())
+            .all()
+        )
+
     async def list_agents(self, search: Optional[str] = None,
                          capability: Optional[str] = None,
                          status: Optional[AgentStatus] = None,

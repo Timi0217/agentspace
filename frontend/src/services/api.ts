@@ -74,6 +74,24 @@ export interface DiscoverParams {
   limit?: number
 }
 
+// Agents owned by the current user (builder dashboard)
+export interface ManagedAgent {
+  id: string
+  handle: string
+  name: string
+  avatar_url?: string | null
+  manifest_url?: string | null
+  capabilities?: Record<string, unknown> | string[] | null
+  policy?: Record<string, unknown> | null
+  status: string
+  last_seen?: string | null
+  rate_limit_per_hour?: number
+  created_at: string
+  webhook_url?: string | null
+  current_hour_requests?: number
+  is_active?: boolean
+}
+
 // Notification types
 export interface NotificationItem {
   id: string
@@ -171,6 +189,31 @@ export const registryAPI = {
     const response = await api.post('/agents/registry', data, {
       headers: { Authorization: `Bearer ${token}` },
     })
+    return response.data
+  },
+}
+
+// Agent management API (builder dashboard) — gateway-backed, owner-scoped
+export const agentsAPI = {
+  async mine(token: string): Promise<ManagedAgent[]> {
+    const response = await api.get('/gateway/agents/mine', {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    return response.data.agents || []
+  },
+
+  async deactivate(agentId: string, token: string): Promise<void> {
+    await api.delete(`/gateway/agents/${agentId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+  },
+
+  async regenerateKey(agentId: string, token: string): Promise<{ agent_id: string; api_key: string }> {
+    const response = await api.post(
+      `/gateway/auth/agent-token?agent_id=${encodeURIComponent(agentId)}`,
+      {},
+      { headers: { Authorization: `Bearer ${token}` } }
+    )
     return response.data
   },
 }
