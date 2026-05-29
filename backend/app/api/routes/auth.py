@@ -67,6 +67,11 @@ def github_oauth_login():
         "redirect_uri": GITHUB_REDIRECT_URI,
         "scope": "user:email",  # Request email scope to get user email
         "state": state,
+        # Force GitHub to show the account picker instead of silently reusing
+        # the current session, so users can sign in with a different account
+        # after logging out. (GitHub added support for the standard OAuth
+        # `prompt` parameter in June 2024.)
+        "prompt": "select_account",
     }
 
     auth_url = f"{github_auth_url}?{urlencode(params)}"
