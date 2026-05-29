@@ -61,6 +61,7 @@ def github_oauth_login():
     state = secrets.token_urlsafe(32)
 
     # Construct GitHub OAuth authorization URL
+    github_auth_url = "https://github.com/login/oauth/authorize"
     params = {
         "client_id": GITHUB_CLIENT_ID,
         "redirect_uri": GITHUB_REDIRECT_URI,
@@ -68,13 +69,8 @@ def github_oauth_login():
         "state": state,
     }
 
-    # Force GitHub to present its login/account screen instead of silently
-    # reusing the current session. We do this by routing through GitHub's
-    # /login page with return_to pointing at the OAuth authorize path, so the
-    # user can choose / sign in as a different account.
-    authorize_path = f"/login/oauth/authorize?{urlencode(params)}"
-    login_url = f"https://github.com/login?{urlencode({'return_to': authorize_path})}"
-    return RedirectResponse(url=login_url)
+    auth_url = f"{github_auth_url}?{urlencode(params)}"
+    return RedirectResponse(url=auth_url)
 
 
 @router.get("/callback")
