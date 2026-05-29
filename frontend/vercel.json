@@ -2,7 +2,7 @@
   "buildCommand": "npm run build",
   "devCommand": "npm run dev",
   "installCommand": "npm install",
-  "framework": "react",
+  "framework": "vite",
   "outputDirectory": "dist",
   "env": {
     "VITE_API_URL": "@vite_api_url",
