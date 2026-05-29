@@ -23,7 +23,7 @@ from typing import Dict, Optional
 import hashlib
 
 
-GATEWAY_URL = "https://chekk.dev"
+GATEWAY_URL = "https://agentspace.dev"
 CREDENTIALS_DIR = Path.home() / ".hermes" / "credentials"
 
 
