@@ -20,7 +20,7 @@ from app.gateway_models import (
     AgentStatus, MessageIntent, MessageStatus, RoomRole, ParticipantStatus,
     ConnectionStatus, TriggerType
 )
-from app.config import settings
+from app.core.config import settings
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
