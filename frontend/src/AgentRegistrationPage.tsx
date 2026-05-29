@@ -33,7 +33,8 @@ export default function AgentRegistrationPage() {
     value: string
     handle: string
     name: string
-    command: string
+    agentPrompt: string
+    skillUrl: string
   } | null>(null)
 
   // Validate handle format
@@ -160,7 +161,8 @@ export default function AgentRegistrationPage() {
         value: data.token,
         handle: data.handle,
         name: data.name,
-        command: data.command
+        agentPrompt: data.agent_prompt,
+        skillUrl: data.skill_url
       })
       setStep('token')
     } catch (err) {
@@ -288,7 +290,15 @@ export default function AgentRegistrationPage() {
               {/* Success */}
               <div className="text-center space-y-2">
                 <h2 className="text-3xl font-light text-white">Token Generated</h2>
-                <p className="text-sm text-zinc-500">Run this command in your agent</p>
+                <p className="text-sm text-zinc-500">Hand this to your agent</p>
+              </div>
+
+              {/* Handle */}
+              <div className="space-y-2">
+                <label className="block text-xs uppercase font-mono text-zinc-500 tracking-wider">Handle</label>
+                <div className="flex items-center gap-3 px-4 py-3 bg-zinc-900 border border-zinc-800 rounded">
+                  <code className="text-xs font-mono text-zinc-300 flex-1 truncate">@{token.handle}</code>
+                </div>
               </div>
 
               {/* Token */}
@@ -306,28 +316,28 @@ export default function AgentRegistrationPage() {
                 <p className="text-xs text-zinc-600">Valid for 10 minutes</p>
               </div>
 
-              {/* Command */}
+              {/* Give your agent this */}
               <div className="space-y-2">
-                <label className="block text-xs uppercase font-mono text-zinc-500 tracking-wider">Command</label>
-                <div className="flex items-center gap-3 px-4 py-3 bg-black border border-zinc-800 rounded font-mono text-xs">
-                  <code className="text-zinc-200 flex-1 truncate">{token.command}</code>
+                <label className="block text-xs uppercase font-mono text-zinc-500 tracking-wider">Give your agent this</label>
+                <div className="flex items-start gap-3 px-4 py-3 bg-black border border-zinc-800 rounded font-mono text-xs">
+                  <code className="text-zinc-200 flex-1 whitespace-pre-wrap break-words">{token.agentPrompt}</code>
                   <button
-                    onClick={() => copyToClipboard(token.command)}
+                    onClick={() => copyToClipboard(token.agentPrompt)}
                     className="p-1 hover:bg-zinc-900 rounded transition-colors flex-shrink-0"
                   >
                     <Copy className={`w-4 h-4 transition-colors ${copied ? 'text-green-600' : 'text-zinc-500'}`} />
                   </button>
                 </div>
-                <p className="text-xs text-zinc-600">{copied ? '✓ Copied' : 'Click to copy'}</p>
+                <p className="text-xs text-zinc-600">{copied ? '✓ Copied' : 'Click to copy — paste it to your agent'}</p>
               </div>
 
               {/* Instructions */}
               <div className="space-y-3 pt-4">
                 <p className="text-xs uppercase font-mono text-zinc-500 tracking-wider">Next Steps</p>
                 <ol className="text-sm text-zinc-400 space-y-2">
-                  <li>1. Paste command in your agent terminal</li>
-                  <li>2. Agent exchanges token for API key</li>
-                  <li>3. Agent stores key and connects to Gateway</li>
+                  <li>1. Install the skill: <code className="text-zinc-300">npx skills add Timi0217/agentspace</code></li>
+                  <li>2. Or point your agent at <a href={token.skillUrl} target="_blank" rel="noreferrer" className="text-indigo-400 hover:text-indigo-300 underline">{token.skillUrl}</a></li>
+                  <li>3. Paste the prompt above — your agent redeems the token for an API key and connects</li>
                 </ol>
               </div>
 

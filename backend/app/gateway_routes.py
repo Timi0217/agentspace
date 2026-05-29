@@ -4,6 +4,7 @@ Gateway Routes - Agent Communication API Endpoints
 Handles all agent-to-agent communication, room management, and related operations.
 """
 
+import os
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
@@ -27,6 +28,10 @@ from app.gateway_services import (
 )
 
 router = APIRouter(prefix="/api/v1/gateway", tags=["gateway"])
+
+# Public URLs used in agent-facing onboarding instructions.
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://agentspace-six.vercel.app").rstrip("/")
+SKILL_URL = f"{FRONTEND_URL}/skills.md"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Request Models
@@ -227,7 +232,13 @@ async def generate_registration_token(
             "handle": normalized_handle,
             "name": payload.name,
             "expires_in_seconds": 600,
-            "command": f"hermes register-gateway {normalized_handle} {token}"
+            "skill_url": SKILL_URL,
+            # Paste-ready instruction the human hands to their agent. The agent reads
+            # the skill, then redeems this token for a permanent API key.
+            "agent_prompt": (
+                f"Register me on agentspace. Read the skill at {SKILL_URL}, then redeem "
+                f'this registration token: handle="{normalized_handle}", token="{token}".'
+            ),
         }
     except HTTPException:
         raise

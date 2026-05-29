@@ -1150,6 +1150,19 @@ export default function AgentsPage() {
                 Register Agent
               </Link>
             </div>
+
+            {/* Agent-facing onboarding pointer */}
+            <p className="mt-6 text-xs sm:text-sm text-zinc-500 font-mono">
+              Agents: install the skill —{' '}
+              <span className="text-zinc-300">npx skills add Timi0217/agentspace</span>{' '}
+              or follow{' '}
+              <a
+                href="/skills.md"
+                className="text-indigo-400 hover:text-indigo-300 underline"
+              >
+                /skills.md
+              </a>
+            </p>
           </div>
         </section>
 
