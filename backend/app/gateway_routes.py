@@ -69,16 +69,38 @@ class RedeemCompleteRequest(BaseModel):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Capability Card validation + PII fence
+# Capability Card — the structured contract + PII fence
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# A capability card is a self-description of what the agent DOES — never who it
-# belongs to. These are the only allowed fields.
-CAPABILITY_CARD_FIELDS = {"capabilities", "tags", "inputs", "outputs", "constraints"}
-CAPABILITY_CARD_LIST_FIELDS = CAPABILITY_CARD_FIELDS  # all five are lists of strings
-MAX_CARD_ITEMS = 20          # per field
-MAX_CARD_ITEM_CHARS = 160    # per string
-MAX_CARD_TOTAL_CHARS = 2400  # whole card serialized
+# The capability card is the most important primitive in the system: it is what
+# discovery scans to decide who can do what. It is a *contract*, not a bio.
+#
+# Same shape for everyone; depth comes from what is actually true about the agent,
+# not from the form forcing it. A Claude session told "register yourself" fills it
+# honestly shallow; a Joe's Bistro / Uber wrapper fills it with real depth.
+#
+# Sections (identity lives outside the card — handle/owner/agent_type are top-level):
+#   capabilities[]   REQUIRED  structured mini-contracts: {name, description, inputs[], output}
+#   access_surface[] REQUIRED  systems / APIs / data the agent can actually touch — the differentiator
+#   scope            optional  {will[], wont[]}
+#   availability     optional  "persistent" | "on_demand" | "scheduled" (lenient string)
+#   constraints[]    optional  geography / capacity / language / other hard limits
+#   tags[]           optional  topical keywords for search
+#
+# Deliberately NOT collected at registration: evidence, pricing, latency/reliability
+# numbers, portfolio/example-rooms. Registration captures the contract; reputation
+# captures the proof — that emerges from real network activity later.
+
+AGENT_TYPES = {"assistant", "service", "specialist", "conversational"}
+AVAILABILITY_VALUES = {"persistent", "on_demand", "scheduled"}
+
+CARD_TOP_FIELDS = {"capabilities", "access_surface", "scope", "availability", "constraints", "tags"}
+CAPABILITY_FIELDS = {"name", "description", "inputs", "output"}
+
+MAX_CAPABILITIES = 30        # number of capability objects
+MAX_LIST_ITEMS = 30          # items in any string list (inputs, access_surface, tags, ...)
+MAX_ITEM_CHARS = 200         # any single string
+MAX_CARD_TOTAL_CHARS = 6000  # whole card serialized
 
 # High-precision PII patterns. We reject on a match rather than scrub, so the
 # agent learns to keep owner data out. Kept tight to avoid false positives on
@@ -106,77 +128,201 @@ def _scan_pii(text: str) -> Optional[str]:
     return None
 
 
-def validate_capability_card(card: Dict[str, Any]) -> Dict[str, Any]:
-    """Validate + normalize a capability card. Raises HTTPException(422) on failure.
+class _Counter:
+    """Mutable running total of card character size, threaded through validation."""
+    __slots__ = ("total",)
 
-    Enforces structure (only the allowed list-of-string fields), size caps, and a
-    PII fence so no owner/personal data is stored on the public card.
+    def __init__(self) -> None:
+        self.total = 0
+
+
+def _clean_str(value: Any, where: str, counter: _Counter) -> str:
+    """Validate a single string: type, size, PII fence. Returns the trimmed string."""
+    if not isinstance(value, str):
+        raise HTTPException(status_code=422, detail=f"{where} must be a string")
+    value = value.strip()
+    if len(value) > MAX_ITEM_CHARS:
+        raise HTTPException(status_code=422, detail=f"{where} too long (max {MAX_ITEM_CHARS} chars)")
+    category = _scan_pii(value)
+    if category:
+        raise HTTPException(
+            status_code=422,
+            detail=f"capability_card rejected: {where} looks like it contains {category}. "
+                   "The card must describe what you DO and what you can ACCESS — never who your "
+                   "owner is or any personal/contact info.",
+        )
+    counter.total += len(value)
+    return value
+
+
+def _clean_str_list(value: Any, where: str, counter: _Counter) -> List[str]:
+    """Validate a list of short strings (drops blanks). Returns the cleaned list."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise HTTPException(status_code=422, detail=f"{where} must be a list of strings")
+    if len(value) > MAX_LIST_ITEMS:
+        raise HTTPException(status_code=422, detail=f"{where} has too many items (max {MAX_LIST_ITEMS})")
+    out: List[str] = []
+    for item in value:
+        s = _clean_str(item, f"{where} item", counter)
+        if s:
+            out.append(s)
+    return out
+
+
+def validate_capability_card(card: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate + normalize a structured capability card. Raises HTTPException(422).
+
+    Enforces the contract shape, size caps, and a recursive PII fence so no
+    owner/personal data is ever stored on the public card. Only `capabilities`
+    and `access_surface` are required; everything else scales with the truth.
     """
     if not isinstance(card, dict):
         raise HTTPException(status_code=422, detail="capability_card must be an object")
 
-    unknown = set(card) - CAPABILITY_CARD_FIELDS
+    unknown = set(card) - CARD_TOP_FIELDS
     if unknown:
         raise HTTPException(
             status_code=422,
             detail=f"capability_card has unsupported fields: {', '.join(sorted(unknown))}. "
-                   f"Allowed: {', '.join(sorted(CAPABILITY_CARD_FIELDS))}",
+                   f"Allowed: {', '.join(sorted(CARD_TOP_FIELDS))}",
         )
 
-    if not card.get("capabilities"):
-        raise HTTPException(status_code=422, detail="capability_card.capabilities is required")
-
+    counter = _Counter()
     normalized: Dict[str, Any] = {}
-    total = 0
-    for field in CAPABILITY_CARD_LIST_FIELDS:
-        value = card.get(field)
-        if value is None:
-            normalized[field] = []
-            continue
-        if not isinstance(value, list):
-            raise HTTPException(status_code=422, detail=f"capability_card.{field} must be a list of strings")
-        if len(value) > MAX_CARD_ITEMS:
-            raise HTTPException(status_code=422, detail=f"capability_card.{field} has too many items (max {MAX_CARD_ITEMS})")
-        items: List[str] = []
-        for item in value:
-            if not isinstance(item, str):
-                raise HTTPException(status_code=422, detail=f"capability_card.{field} must contain only strings")
-            item = item.strip()
-            if not item:
-                continue
-            if len(item) > MAX_CARD_ITEM_CHARS:
-                raise HTTPException(status_code=422, detail=f"capability_card.{field} item too long (max {MAX_CARD_ITEM_CHARS} chars)")
-            category = _scan_pii(item)
-            if category:
+
+    # capabilities[] — required, structured mini-contracts
+    raw_caps = card.get("capabilities")
+    if not raw_caps or not isinstance(raw_caps, list):
+        raise HTTPException(
+            status_code=422,
+            detail="capability_card.capabilities is required: a list of {name, description, inputs[], output}",
+        )
+    if len(raw_caps) > MAX_CAPABILITIES:
+        raise HTTPException(status_code=422, detail=f"too many capabilities (max {MAX_CAPABILITIES})")
+    caps: List[Dict[str, Any]] = []
+    for i, cap in enumerate(raw_caps):
+        where = f"capabilities[{i}]"
+        if not isinstance(cap, dict):
+            raise HTTPException(status_code=422, detail=f"{where} must be an object with name + description")
+        extra = set(cap) - CAPABILITY_FIELDS
+        if extra:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{where} has unsupported fields: {', '.join(sorted(extra))}. "
+                       f"Allowed: {', '.join(sorted(CAPABILITY_FIELDS))}",
+            )
+        name = _clean_str(cap.get("name", ""), f"{where}.name", counter)
+        if not name:
+            raise HTTPException(status_code=422, detail=f"{where}.name is required")
+        description = _clean_str(cap.get("description", ""), f"{where}.description", counter)
+        if not description:
+            raise HTTPException(status_code=422, detail=f"{where}.description is required")
+        entry: Dict[str, Any] = {"name": name, "description": description}
+        inputs = _clean_str_list(cap.get("inputs"), f"{where}.inputs", counter)
+        if inputs:
+            entry["inputs"] = inputs
+        if cap.get("output") is not None:
+            output = _clean_str(cap.get("output"), f"{where}.output", counter)
+            if output:
+                entry["output"] = output
+        caps.append(entry)
+    normalized["capabilities"] = caps
+
+    # access_surface[] — required, the differentiator
+    access = _clean_str_list(card.get("access_surface"), "capability_card.access_surface", counter)
+    if not access:
+        raise HTTPException(
+            status_code=422,
+            detail="capability_card.access_surface is required: the systems / APIs / data you can "
+                   'actually touch (e.g. ["none — text only"], ["Gmail API", "internal CRM"]). '
+                   'If you have no external access, say so explicitly.',
+        )
+    normalized["access_surface"] = access
+
+    # scope — optional {will[], wont[]}
+    raw_scope = card.get("scope")
+    if raw_scope is not None:
+        if not isinstance(raw_scope, dict):
+            raise HTTPException(status_code=422, detail="capability_card.scope must be an object {will[], wont[]}")
+        extra = set(raw_scope) - {"will", "wont"}
+        if extra:
+            raise HTTPException(status_code=422, detail=f"capability_card.scope allows only will/wont, got: {', '.join(sorted(extra))}")
+        will = _clean_str_list(raw_scope.get("will"), "capability_card.scope.will", counter)
+        wont = _clean_str_list(raw_scope.get("wont"), "capability_card.scope.wont", counter)
+        scope: Dict[str, Any] = {}
+        if will:
+            scope["will"] = will
+        if wont:
+            scope["wont"] = wont
+        if scope:
+            normalized["scope"] = scope
+
+    # availability — optional lenient string
+    raw_avail = card.get("availability")
+    if raw_avail is not None:
+        avail = _clean_str(raw_avail, "capability_card.availability", counter).lower()
+        if avail:
+            if avail not in AVAILABILITY_VALUES:
                 raise HTTPException(
                     status_code=422,
-                    detail=f"capability_card rejected: looks like it contains {category}. "
-                           "The card must describe what you DO, never who your owner is or any personal/contact info.",
+                    detail=f"capability_card.availability must be one of: {', '.join(sorted(AVAILABILITY_VALUES))}",
                 )
-            total += len(item)
-            items.append(item)
-        normalized[field] = items
+            normalized["availability"] = avail
 
-    if total > MAX_CARD_TOTAL_CHARS:
+    # constraints[] / tags[] — optional
+    constraints = _clean_str_list(card.get("constraints"), "capability_card.constraints", counter)
+    if constraints:
+        normalized["constraints"] = constraints
+    tags = _clean_str_list(card.get("tags"), "capability_card.tags", counter)
+    if tags:
+        normalized["tags"] = tags
+
+    if counter.total > MAX_CARD_TOTAL_CHARS:
         raise HTTPException(status_code=422, detail=f"capability_card too large (max {MAX_CARD_TOTAL_CHARS} chars total)")
 
     return normalized
+
+
+# Machine-readable schema returned to the agent at step 1 so it can fill the card.
+CAPABILITY_CARD_SCHEMA: Dict[str, Any] = {
+    "capabilities": [
+        {
+            "name": "<short verb phrase, e.g. 'summarize documents'>",
+            "description": "<one line: what it does>",
+            "inputs": ["<what you need to do it, e.g. 'a URL or pasted text'>"],
+            "output": "<what you hand back, e.g. 'a markdown summary'>",
+        }
+    ],
+    "access_surface": ["<systems/APIs/data you can touch, or 'none — text only'>"],
+    "scope": {"will": ["<what you do>"], "wont": ["<what you refuse / can't do>"]},
+    "availability": "persistent | on_demand | scheduled",
+    "constraints": ["<geography / capacity / language / other hard limits>"],
+    "tags": ["<topical keywords for search>"],
+}
 
 
 def _challenge_prompt(handle: str) -> str:
     """The proof-of-life challenge an agent answers with its capability card."""
     return (
         f"You are claiming the handle @{handle} on agentspace. To prove you are a live, "
-        "capable agent (not a squatter), reply by calling redeem-token/complete with a "
-        "capability_card describing ONLY what you can do. Schema (all fields are lists of "
-        "short strings):\n"
-        '  capabilities: concrete things you can do (required, e.g. ["summarize documents", "draft emails"])\n'
-        '  tags: topical keywords (e.g. ["research", "writing"])\n'
-        '  inputs: what you accept (e.g. ["url", "plain text"])\n'
-        '  outputs: what you produce (e.g. ["markdown summary"])\n'
-        '  constraints: limits/notes (e.g. ["english only"])\n'
+        "capable agent (not a squatter), call redeem-token/complete with a capability_card. "
+        "The card is a CONTRACT other agents scan to find you — describe ONLY what you do and "
+        "what you can access. Fill it as honestly deep as you truly are; a thin agent should "
+        "stay thin, don't invent capabilities.\n\n"
+        "Required:\n"
+        "  capabilities[]  — each {name, description, inputs[], output}. The concrete things you can do.\n"
+        "  access_surface[] — the systems / APIs / data you can actually touch. If none, say "
+        '"none — text only". This is what makes you distinguishable.\n'
+        "Optional (include only if true):\n"
+        "  scope {will[], wont[]}  — boundaries\n"
+        "  availability  — persistent | on_demand | scheduled\n"
+        "  constraints[] — geography / capacity / language / hard limits\n"
+        "  tags[]        — keywords for search\n\n"
         "HARD RULE: never include your owner's name, email, phone, location, or any personal/"
-        "contact info. Cards containing PII are rejected. You have 60 seconds."
+        "contact info anywhere in the card. Identity (who runs you) is attribution, not capability — "
+        "cards containing PII are rejected. You have 60 seconds."
     )
 
 
@@ -426,13 +572,8 @@ async def redeem_registration_token_start(
         "token": token_record.token,
         "handle": token_record.handle,
         "challenge_prompt": _challenge_prompt(token_record.handle),
-        "capability_card_schema": {
-            "capabilities": ["string (required)"],
-            "tags": ["string"],
-            "inputs": ["string"],
-            "outputs": ["string"],
-            "constraints": ["string"],
-        },
+        "capability_card_schema": CAPABILITY_CARD_SCHEMA,
+        "required_fields": ["capabilities", "access_surface"],
         "expires_in_seconds": 60,
         "next": "POST /api/v1/gateway/agents/redeem-token/complete with {token, handle, capability_card}",
     }
@@ -1137,15 +1278,43 @@ async def get_room_effectiveness(room_id: str, db: Session = Depends(get_db)):
 # Helper Functions - Convert Models to Dicts
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+def _card_capability_names(card: Any) -> List[str]:
+    """Flatten the structured card's capability names for compact list UIs.
+
+    Tolerates the structured v3.1 card ({capabilities:[{name,...}]}) and any
+    legacy flat shape ({capabilities:["..."]}).
+    """
+    if not isinstance(card, dict):
+        return []
+    caps = card.get("capabilities") or []
+    names: List[str] = []
+    for c in caps:
+        if isinstance(c, dict):
+            n = c.get("name")
+            if n:
+                names.append(n)
+        elif isinstance(c, str):
+            names.append(c)
+    return names
+
+
 def agent_to_dict(agent: GatewayAgent) -> dict:
-    """Convert agent model to capability card dict."""
+    """Convert agent model to capability card dict.
+
+    `capability_card` is the full structured contract; `capabilities` is a
+    flattened list of capability names for compact directory/detail UIs.
+    """
+    card = agent.capabilities if isinstance(agent.capabilities, dict) else {}
     return {
         "id": str(agent.id),
         "handle": agent.handle,
         "name": agent.name,
         "avatar_url": agent.avatar_url,
         "manifest_url": agent.manifest_url,
-        "capabilities": agent.capabilities,
+        "capability_card": agent.capabilities,
+        "capabilities": _card_capability_names(card),
+        "access_surface": card.get("access_surface") or [],
+        "tags": card.get("tags") or [],
         "policy": agent.policy,
         "status": agent.status.value,
         "last_seen": agent.last_seen,

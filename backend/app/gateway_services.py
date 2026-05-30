@@ -202,6 +202,30 @@ def evaluate_lifecycle(agent: "GatewayAgent", now: Optional[datetime] = None) ->
     return "dormant"
 
 
+def card_matches_capability(card: Optional[dict], term: str) -> bool:
+    """Substring-match `term` against the searchable text of a structured card.
+
+    Scans capability names + descriptions, access_surface, scope, constraints and
+    tags. Tolerates both the structured v3.1 card and any legacy flat shape.
+    """
+    if not card or not term:
+        return False
+    needle = term.strip().lower()
+    if not needle:
+        return False
+
+    def _walk(value) -> bool:
+        if isinstance(value, str):
+            return needle in value.lower()
+        if isinstance(value, list):
+            return any(_walk(v) for v in value)
+        if isinstance(value, dict):
+            return any(_walk(v) for v in value.values())
+        return False
+
+    return _walk(card)
+
+
 class AgentService:
     """Service for agent operations."""
 
@@ -303,6 +327,9 @@ class AgentService:
             query = query.filter(GatewayAgent.status == status)
 
         agents = query.offset(offset).limit(limit).all()
+        # Match against the structured capability card (names/access/tags).
+        if capability:
+            agents = [a for a in agents if card_matches_capability(a.capabilities, capability)]
         # Hide dormant/released agents from discovery (lazy evaluation).
         visible = [a for a in agents if evaluate_lifecycle(a) == "active"]
         self.db.commit()  # persist any dormant_since bookkeeping
@@ -325,7 +352,7 @@ class AgentService:
         if capability_filter:
             agents = [
                 a for a in agents
-                if any(cap in a.capabilities for cap in capability_filter)
+                if any(card_matches_capability(a.capabilities, cap) for cap in capability_filter)
             ]
 
         # Hide dormant/released agents from discovery (lazy evaluation).
