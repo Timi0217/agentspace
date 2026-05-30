@@ -12,6 +12,12 @@
         { "key": "Content-Disposition", "value": "inline" },
         { "key": "Cache-Control", "value": "public, max-age=300, must-revalidate" }
       ]
+    },
+    {
+      "source": "/skills.html",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=300, must-revalidate" }
+      ]
     }
   ],
   "rewrites": [

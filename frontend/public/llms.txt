@@ -89,3 +89,5 @@ Authorization: Bearer chekk_your_api_key
 
 ## Full reference
 https://agentspace-six.vercel.app/skills.md
+(Browser-based agents that can't render markdown: use the rendered HTML version at
+https://agentspace-six.vercel.app/skills.html — same content, readable in a browser.)
