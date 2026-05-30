@@ -22,6 +22,7 @@ from app.gateway_models import (
     ConnectionStatus, TriggerType
 )
 from app.gateway_auth import get_current_user, get_current_agent, get_optional_user, get_optional_agent
+from app.gateway_webhook import verify_webhook
 from app.gateway_services import (
     GatewayService, MessageService, RoomService, AgentService,
     ContextSummarizationService, TriggerService
@@ -55,6 +56,8 @@ class GenerateRegistrationTokenRequest(BaseModel):
 class RedeemRegistrationTokenRequest(BaseModel):
     token: str
     handle: str
+    webhook_url: str
+    manifest_url: Optional[str] = None
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Authentication Endpoints
@@ -237,7 +240,9 @@ async def generate_registration_token(
             # the skill, then redeems this token for a permanent API key.
             "agent_prompt": (
                 f"Register me on agentspace. Read the skill at {SKILL_URL}, then redeem "
-                f'this registration token: handle="{normalized_handle}", token="{token}".'
+                f'this registration token: handle="{normalized_handle}", token="{token}". '
+                "When you redeem, include your live inbound webhook URL (your connector's "
+                "endpoint) — agentspace verifies it is reachable before activating you."
             ),
         }
     except HTTPException:
@@ -282,13 +287,21 @@ async def redeem_registration_token(
     if token_record.handle != payload.handle:
         raise HTTPException(status_code=400, detail="Handle does not match token")
 
+    # A permanent agent must register a live inbound webhook. Verify it is
+    # reachable and speaks HTTP before we provision the agent — a bad URL is a
+    # broken agent, not a degraded one, so we reject up front.
+    ok, detail = await verify_webhook(payload.webhook_url)
+    if not ok:
+        raise HTTPException(status_code=400, detail=f"webhook verification failed: {detail}")
+
     # Create agent
     service = AgentService(db)
     try:
         agent, api_key = await service.create_agent(
             handle=token_record.handle,
             name=token_record.name,
-            webhook_url="",  # Will be filled by agent via API call
+            webhook_url=payload.webhook_url.strip(),
+            manifest_url=payload.manifest_url,
             created_by_user_id=token_record.user_id
         )
     except Exception as e:
@@ -354,15 +367,52 @@ async def get_agent(agent_id: str, db: Session = Depends(get_db)):
     return agent_to_dict(agent)
 
 
+# Fields an agent is allowed to change about itself. Anything else (handle,
+# api_key_hash, is_active, rate limits, etc.) is off-limits via this route.
+AGENT_SELF_UPDATABLE_FIELDS = {
+    "webhook_url", "manifest_url", "avatar_url", "name", "capabilities", "policy",
+}
+
+
 @router.patch("/agents/{agent_id}")
 async def update_agent(
     agent_id: str, updates: dict,
-    current_user: GatewayUser = Depends(get_current_user),
+    current_user: Optional[GatewayUser] = Depends(get_optional_user),
+    current_agent: Optional[GatewayAgent] = Depends(get_optional_agent),
     db: Session = Depends(get_db)
 ):
-    """Update agent profile."""
+    """
+    Update an agent profile.
+
+    Authorized either as the agent itself (its API key, limited to its own
+    safe profile fields) or as a human user who owns the agent.
+    """
+    is_self = current_agent is not None and str(current_agent.id) == str(agent_id)
+
+    if is_self:
+        # Restrict an agent to safe self-service fields.
+        rejected = set(updates) - AGENT_SELF_UPDATABLE_FIELDS
+        if rejected:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Agents may not update: {', '.join(sorted(rejected))}",
+            )
+        # If the webhook is changing, re-verify it before accepting.
+        if "webhook_url" in updates:
+            ok, detail = await verify_webhook(updates["webhook_url"])
+            if not ok:
+                raise HTTPException(status_code=400, detail=f"webhook verification failed: {detail}")
+        owner_user_id = None  # agent self-update bypasses the ownership check
+    elif current_user is not None:
+        owner_user_id = current_user.id  # service enforces ownership
+    else:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
     service = AgentService(db)
-    agent = await service.update_agent(agent_id, updates, current_user.id)
+    try:
+        agent = await service.update_agent(agent_id, updates, owner_user_id)
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     return agent_to_dict(agent)
 
 
@@ -404,7 +454,7 @@ async def get_agent_capabilities(agent_id: str, db: Session = Depends(get_db)):
 @router.post("/rooms")
 async def create_room(
     name: str, agent_ids: List[str], description: Optional[str] = None,
-    is_private: bool = False, current_user: Optional[GatewayUser] = Depends(get_current_user),
+    is_private: bool = False, current_user: Optional[GatewayUser] = Depends(get_optional_user),
     current_agent: Optional[GatewayAgent] = Depends(get_optional_agent),
     db: Session = Depends(get_db)
 ):
@@ -412,6 +462,9 @@ async def create_room(
     Create a new room with specified agents.
     Can be initiated by human user or agent.
     """
+    if current_agent is None and current_user is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
     service = RoomService(db)
     created_by_agent_id = current_agent.id if current_agent else None
     created_by_user_id = current_user.id if current_user else None
@@ -539,6 +592,9 @@ async def send_message(
     Send message from one agent to another in a room.
     Message is placed in queue for async webhook delivery.
     """
+    if current_agent is None:
+        raise HTTPException(status_code=401, detail="Valid agent API key required")
+
     service = MessageService(db)
 
     # Validate rate limit

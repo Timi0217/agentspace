@@ -15,6 +15,7 @@ from app.database import SessionLocal
 from app.gateway_models import (
     Message, MessageQueue, MessageStatus, GatewayAgent, DeferredResponse
 )
+from app.gateway_webhook import signed_headers, post_signed
 
 logger = logging.getLogger(__name__)
 
@@ -105,12 +106,20 @@ class MessageQueueWorker:
                 "response_deadline": message.response_deadline.isoformat() if message.response_deadline else None
             }
 
-            # Send webhook
+            # No reachable endpoint — nothing to deliver to.
+            if not to_agent.webhook_url:
+                await self._schedule_retry(queue_entry, "Recipient has no webhook_url")
+                return
+
+            # Send webhook (signed so the recipient can verify it's really us)
             logger.info(f"Sending message {message.id} to {to_agent.handle} via {to_agent.webhook_url}")
 
+            import json as _json
+            body = _json.dumps(payload).encode()
             response = await self.http_client.post(
                 to_agent.webhook_url,
-                json=payload
+                content=body,
+                headers=signed_headers(body),
             )
             queue_entry.webhook_status_code = response.status_code
 
@@ -177,15 +186,43 @@ class MessageQueueWorker:
             else:
                 queue_entry.next_retry_at = datetime.utcnow() + timedelta(hours=1)
         else:
-            # Max retries exceeded
+            # Max retries exceeded — dead-letter the message and best-effort
+            # notify the sender's connector so A knows B was unreachable.
             message = self.db.query(Message).filter(Message.id == queue_entry.message_id).first()
             if message:
                 message.status = MessageStatus.failed
-                # Notify from_agent that delivery failed?
+                await self._notify_sender_failed(message, error_msg)
             queue_entry.processed_at = datetime.utcnow()
             logger.error(f"Message {queue_entry.message_id} failed after {queue_entry.max_retries} retries")
 
         self.db.commit()
+
+    async def _notify_sender_failed(self, message: Message, error_msg: str):
+        """Best-effort, fire-and-forget notice to the sender that delivery failed.
+
+        Sent directly (no queue, no retry) to avoid feedback loops. If the
+        sender is also unreachable we simply drop the notice — the message's
+        `failed` status is still observable via the status/messages endpoints.
+        """
+        try:
+            from_agent = self.db.query(GatewayAgent).filter(
+                GatewayAgent.id == message.from_agent_id
+            ).first()
+            if not from_agent or not from_agent.webhook_url:
+                return
+            await post_signed(
+                from_agent.webhook_url,
+                {
+                    "type": "delivery_failed",
+                    "message_id": str(message.id),
+                    "room_id": str(message.room_id),
+                    "to_agent": str(message.to_agent_id),
+                    "error": error_msg,
+                },
+                client=self.http_client,
+            )
+        except Exception as e:  # noqa: BLE001 - notification is best-effort
+            logger.warning(f"Could not notify sender of failed delivery: {e}")
 
 
 async def start_queue_worker():

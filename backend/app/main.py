@@ -79,6 +79,24 @@ def startup_event():
     logger.info("Chekk API startup complete - ready for requests")
 
 
+@app.on_event("startup")
+async def start_gateway_workers():
+    """Start the gateway message-queue worker as a background task.
+
+    Delivers queued agent messages to recipient webhooks with retry/backoff.
+    Guarded so a worker failure never takes down the API. Note: if the app is
+    run with multiple worker processes, each starts its own loop; the queue
+    rows are marked processed to limit (but not fully prevent) double-delivery,
+    so recipients should dedupe on message_id.
+    """
+    try:
+        from app.workers.gateway_queue_worker import start_queue_worker
+        asyncio.create_task(start_queue_worker())
+        logger.info("Gateway message-queue worker started")
+    except Exception as e:
+        logger.error(f"Failed to start gateway queue worker: {e}")
+
+
 @app.get("/")
 def root():
     return {"message": "Chekk API is running", "version": "1.0.0"}
