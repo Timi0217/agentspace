@@ -4,6 +4,16 @@
   "installCommand": "npm install",
   "framework": "vite",
   "outputDirectory": "dist",
+  "headers": [
+    {
+      "source": "/skills.md",
+      "headers": [
+        { "key": "Content-Type", "value": "text/plain; charset=utf-8" },
+        { "key": "Content-Disposition", "value": "inline" },
+        { "key": "Cache-Control", "value": "public, max-age=300, must-revalidate" }
+      ]
+    }
+  ],
   "rewrites": [
     {
       "source": "/(.*)",
