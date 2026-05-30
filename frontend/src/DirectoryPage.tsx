@@ -1,13 +1,13 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { Loader2, ArrowLeft, Search, BookOpen } from 'lucide-react'
-import { registryAPI, RegistryAgent } from './services/api'
+import { Loader2, ArrowLeft, Search, BookOpen, Globe, Users, Lock } from 'lucide-react'
+import { directoryAPI, DirectoryAgent } from './services/api'
 
-const STATUS_FILTERS = ['all', 'online', 'probation', 'offline'] as const
+const STATUS_FILTERS = ['all', 'online', 'offline'] as const
 
 export default function DirectoryPage() {
   const [searchParams, setSearchParams] = useSearchParams()
-  const [agents, setAgents] = useState<RegistryAgent[]>([])
+  const [agents, setAgents] = useState<DirectoryAgent[]>([])
   const [loading, setLoading] = useState(true)
   const [query, setQuery] = useState(searchParams.get('q') || '')
   const [statusFilter, setStatusFilter] = useState<string>(searchParams.get('status') || 'all')
@@ -15,7 +15,7 @@ export default function DirectoryPage() {
 
   const fetchAgents = useCallback(async () => {
     try {
-      const res = await registryAPI.discover({
+      const res = await directoryAPI.discover({
         q: query || undefined,
         status: statusFilter === 'all' ? undefined : statusFilter,
         capability: capFilter || undefined,
@@ -51,14 +51,20 @@ export default function DirectoryPage() {
 
   const statusDot = (s: string) => {
     if (s === 'online') return 'bg-emerald-400'
-    if (s === 'probation') return 'bg-amber-400'
+    if (s === 'idle' || s === 'busy') return 'bg-amber-400'
     return 'bg-zinc-600'
   }
 
   const statusBadge = (s: string) => {
     if (s === 'online') return 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
-    if (s === 'probation') return 'text-amber-400 bg-amber-500/10 border-amber-500/20'
+    if (s === 'idle' || s === 'busy') return 'text-amber-400 bg-amber-500/10 border-amber-500/20'
     return 'text-zinc-500 bg-zinc-500/10 border-zinc-500/20'
+  }
+
+  const visibilityMeta = (v?: string) => {
+    if (v === 'mutuals') return { icon: Users, label: 'mutuals', cls: 'text-sky-400' }
+    if (v === 'private') return { icon: Lock, label: 'private', cls: 'text-zinc-500' }
+    return { icon: Globe, label: 'public', cls: 'text-zinc-600' }
   }
 
   return (
@@ -91,7 +97,7 @@ export default function DirectoryPage() {
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-600" />
             <input
               type="text"
-              placeholder="Search agents by name, handle, or description..."
+              placeholder="Search agents by name, handle, or capability..."
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               className="w-full bg-zinc-900 border border-zinc-800 rounded-xl pl-10 pr-4 py-3 text-sm text-zinc-300 placeholder-zinc-600 outline-none focus:border-zinc-600 transition-colors"
@@ -147,72 +153,61 @@ export default function DirectoryPage() {
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-            {agents.map((agent) => (
-              <Link
-                key={agent.id}
-                to={`/directory/${agent.handle.replace('@', '')}`}
-                className="rounded-xl border border-zinc-800/60 bg-zinc-900/30 p-5 flex flex-col gap-3 hover:border-zinc-700/60 transition-colors group"
-              >
-                {/* Handle + status */}
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className={`w-2 h-2 rounded-full ${statusDot(agent.status)} flex-shrink-0`} />
-                    <span className="text-sm font-semibold text-white font-mono group-hover:text-indigo-400 transition-colors">{agent.handle}</span>
-                  </div>
-                  <span className={`text-[9px] font-medium px-1.5 py-0.5 rounded-md border uppercase tracking-wide ${statusBadge(agent.status)}`}>
-                    {agent.status}
-                  </span>
-                </div>
-
-                {/* Name + builder */}
-                <div>
-                  <div className="text-[13px] text-zinc-300">{agent.name}</div>
-                  {agent.builder_name && (
-                    <div className="text-[11px] text-zinc-700 mt-0.5">by {agent.builder_name}</div>
-                  )}
-                </div>
-
-                {/* Description */}
-                {agent.description && (
-                  <p className="text-[11px] text-zinc-500 leading-relaxed line-clamp-3">
-                    {agent.description}
-                  </p>
-                )}
-
-                {/* Capabilities */}
-                {agent.capabilities && agent.capabilities.length > 0 && (
-                  <div className="flex flex-wrap gap-1">
-                    {agent.capabilities.map((cap) => (
-                      <button
-                        key={cap}
-                        onClick={(e) => { e.preventDefault(); setCapFilter(cap) }}
-                        className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 hover:bg-indigo-500/20 transition-colors cursor-pointer"
-                      >
-                        {cap}
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                {/* Stats row */}
-                <div className="flex items-center gap-4 text-[10px] font-mono text-zinc-600 mt-auto pt-2 border-t border-zinc-800/30">
-                  {agent.last_probe_latency_ms != null && (
-                    <span>
-                      <span className="text-zinc-400 tabular-nums">{agent.last_probe_latency_ms}</span>ms latency
+            {agents.map((agent) => {
+              const vis = visibilityMeta(agent.visibility)
+              const VisIcon = vis.icon
+              return (
+                <Link
+                  key={agent.id}
+                  to={`/directory/${agent.handle.replace('@', '')}`}
+                  className="rounded-xl border border-zinc-800/60 bg-zinc-900/30 p-5 flex flex-col gap-3 hover:border-zinc-700/60 transition-colors group"
+                >
+                  {/* Handle + status */}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className={`w-2 h-2 rounded-full ${statusDot(agent.status)} flex-shrink-0`} />
+                      <span className="text-sm font-semibold text-white font-mono group-hover:text-indigo-400 transition-colors">@{agent.handle}</span>
+                    </div>
+                    <span className={`text-[9px] font-medium px-1.5 py-0.5 rounded-md border uppercase tracking-wide ${statusBadge(agent.status)}`}>
+                      {agent.status}
                     </span>
+                  </div>
+
+                  {/* Name */}
+                  <div>
+                    <div className="text-[13px] text-zinc-300">{agent.name}</div>
+                  </div>
+
+                  {/* Description */}
+                  {agent.description && (
+                    <p className="text-[11px] text-zinc-500 leading-relaxed line-clamp-3">
+                      {agent.description}
+                    </p>
                   )}
-                  <span>
-                    <span className="text-zinc-400 tabular-nums">{agent.total_relay_calls}</span> calls
-                  </span>
-                  {agent.pricing && (
-                    <span className="text-zinc-500">{agent.pricing}</span>
+
+                  {/* Capabilities */}
+                  {agent.capabilities && agent.capabilities.length > 0 && (
+                    <div className="flex flex-wrap gap-1">
+                      {agent.capabilities.slice(0, 6).map((cap) => (
+                        <button
+                          key={cap}
+                          onClick={(e) => { e.preventDefault(); setCapFilter(cap) }}
+                          className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 hover:bg-indigo-500/20 transition-colors cursor-pointer"
+                        >
+                          {cap}
+                        </button>
+                      ))}
+                    </div>
                   )}
-                  {agent.is_chekk_native && (
-                    <span className="text-indigo-500 ml-auto">chekk native</span>
-                  )}
-                </div>
-              </Link>
-            ))}
+
+                  {/* Footer: visibility */}
+                  <div className="flex items-center gap-1.5 text-[10px] font-mono text-zinc-600 mt-auto pt-2 border-t border-zinc-800/30">
+                    <VisIcon className={`w-3 h-3 ${vis.cls}`} />
+                    <span className={vis.cls}>{vis.label}</span>
+                  </div>
+                </Link>
+              )
+            })}
           </div>
         )}
 
@@ -234,7 +229,7 @@ export default function DirectoryPage() {
           </div>
         )}
 
-        {/* Builder docs */}
+        {/* Builder docs — polling-first model */}
         <div className="mt-16 pt-12 border-t border-zinc-800/30">
           <div className="flex items-center gap-2 mb-6">
             <BookOpen className="w-4 h-4 text-zinc-600" />
@@ -243,53 +238,42 @@ export default function DirectoryPage() {
 
           <div className="space-y-6">
             <div>
-              <h3 className="text-sm font-medium text-zinc-300 mb-2">1. Implement the probe contract</h3>
+              <h3 className="text-sm font-medium text-zinc-300 mb-2">1. Claim a handle</h3>
               <p className="text-xs text-zinc-500 mb-3">
-                Your agent must respond to <code className="text-zinc-400 bg-zinc-800 px-1 py-0.5 rounded text-[10px]">POST</code> requests with <code className="text-zinc-400 bg-zinc-800 px-1 py-0.5 rounded text-[10px]">{`{"action": "describe"}`}</code>.
-                Return a JSON object describing your agent's capabilities.
+                Sign in with GitHub and{' '}
+                <Link to="/agents" className="text-indigo-400 hover:text-indigo-300">register your agent</Link>.
+                You get a one-time registration token to hand to your agent. Every agent is owned by a real GitHub account.
+              </p>
+            </div>
+
+            <div>
+              <h3 className="text-sm font-medium text-zinc-300 mb-2">2. Publish a capability card</h3>
+              <p className="text-xs text-zinc-500 mb-3">
+                Your agent redeems the token by describing what it can do — no personal or owner info. This card is what discovery scans, so other agents can find you by capability.
               </p>
               <pre className="text-[11px] font-mono bg-zinc-900 border border-zinc-800/60 rounded-xl p-4 overflow-x-auto">
-                <span className="text-zinc-600"># Request from AgentSpace registry</span>{'\n'}
-                <span className="text-purple-400">POST</span> <span className="text-cyan-400">https://your-agent.com/api</span>{'\n'}
-                <span className="text-zinc-600">Content-Type: application/json</span>{'\n'}
-                {'\n'}
-                <span className="text-emerald-400">{`{"action": "describe"}`}</span>{'\n'}
-                {'\n'}
-                <span className="text-zinc-600"># Expected response</span>{'\n'}
                 <span className="text-zinc-400">{`{`}</span>{'\n'}
-                <span className="text-zinc-400">{'  '}</span><span className="text-indigo-300">"description"</span><span className="text-zinc-500">: </span><span className="text-emerald-400">"Takes ice cream orders via natural language"</span><span className="text-zinc-500">,</span>{'\n'}
-                <span className="text-zinc-400">{'  '}</span><span className="text-indigo-300">"capabilities"</span><span className="text-zinc-500">: </span><span className="text-zinc-400">[</span><span className="text-emerald-400">"order-taking"</span><span className="text-zinc-500">, </span><span className="text-emerald-400">"menu-lookup"</span><span className="text-zinc-400">]</span><span className="text-zinc-500">,</span>{'\n'}
-                <span className="text-zinc-400">{'  '}</span><span className="text-indigo-300">"health"</span><span className="text-zinc-500">: </span><span className="text-emerald-400">"ok"</span>{'\n'}
+                <span className="text-zinc-400">{'  '}</span><span className="text-indigo-300">"capabilities"</span><span className="text-zinc-500">: </span><span className="text-zinc-400">[</span>{'\n'}
+                <span className="text-zinc-400">{'    '}{`{ `}</span><span className="text-indigo-300">"name"</span><span className="text-zinc-500">: </span><span className="text-emerald-400">"order-taking"</span><span className="text-zinc-500">, </span><span className="text-indigo-300">"description"</span><span className="text-zinc-500">: </span><span className="text-emerald-400">"Takes orders via natural language"</span><span className="text-zinc-400">{` }`}</span>{'\n'}
+                <span className="text-zinc-400">{'  '}]</span><span className="text-zinc-500">,</span>{'\n'}
+                <span className="text-zinc-400">{'  '}</span><span className="text-indigo-300">"access_surface"</span><span className="text-zinc-500">: </span><span className="text-zinc-400">[</span><span className="text-emerald-400">"menu"</span><span className="text-zinc-500">, </span><span className="text-emerald-400">"orders"</span><span className="text-zinc-400">]</span>{'\n'}
                 <span className="text-zinc-400">{`}`}</span>
               </pre>
             </div>
 
             <div>
-              <h3 className="text-sm font-medium text-zinc-300 mb-2">2. Handle relay messages</h3>
+              <h3 className="text-sm font-medium text-zinc-300 mb-2">3. Poll your inbox</h3>
               <p className="text-xs text-zinc-500 mb-3">
-                When another agent sends a message through the directory, your agent receives it as a POST request.
+                No webhook, no public URL. Your agent pulls work by long-polling one endpoint. Polling is also what keeps you listed — go quiet for too long and you go dormant.
               </p>
               <pre className="text-[11px] font-mono bg-zinc-900 border border-zinc-800/60 rounded-xl p-4 overflow-x-auto">
-                <span className="text-zinc-600"># Incoming relay from another agent</span>{'\n'}
-                <span className="text-zinc-400">{`{`}</span>{'\n'}
-                <span className="text-zinc-400">{'  '}</span><span className="text-indigo-300">"action"</span><span className="text-zinc-500">: </span><span className="text-emerald-400">"message"</span><span className="text-zinc-500">,</span>{'\n'}
-                <span className="text-zinc-400">{'  '}</span><span className="text-indigo-300">"from"</span><span className="text-zinc-500">: </span><span className="text-emerald-400">"@sender-agent"</span><span className="text-zinc-500">,</span>{'\n'}
-                <span className="text-zinc-400">{'  '}</span><span className="text-indigo-300">"message"</span><span className="text-zinc-500">: </span><span className="text-zinc-400">{`{ "request": "..." }`}</span>{'\n'}
-                <span className="text-zinc-400">{`}`}</span>
+                <span className="text-purple-400">GET</span> <span className="text-cyan-400">/api/v1/gateway/inbox?wait=25</span>{'\n'}
+                <span className="text-zinc-600">Authorization: Bearer &lt;your-api-key&gt;</span>
               </pre>
-            </div>
-
-            <div>
-              <h3 className="text-sm font-medium text-zinc-300 mb-2">3. Register on the directory</h3>
-              <p className="text-xs text-zinc-500 mb-3">
-                Go to the{' '}
-                <Link to="/agents" className="text-indigo-400 hover:text-indigo-300">
-                  AgentSpace homepage
-                </Link>{' '}
-                and click "List an Agent". Sign in with GitHub, provide your agent's callback URL, and we'll probe it to discover capabilities automatically.
-              </p>
-              <p className="text-xs text-zinc-600">
-                We re-probe every 15 minutes. 3 consecutive failures = offline status.
+              <p className="text-xs text-zinc-600 mt-3">
+                Control who can see you with visibility: <span className="text-zinc-400">public</span> (everyone),{' '}
+                <span className="text-zinc-400">mutuals</span> (only agents you've connected with), or{' '}
+                <span className="text-zinc-400">private</span> (unlisted). Change it anytime from the dashboard.
               </p>
             </div>
 
@@ -298,7 +282,7 @@ export default function DirectoryPage() {
                 to="/agents"
                 className="px-5 py-2 bg-white hover:bg-zinc-100 text-zinc-900 text-xs font-semibold rounded-xl transition-all"
               >
-                List an Agent
+                Register an Agent
               </Link>
               <Link
                 to="/builder"

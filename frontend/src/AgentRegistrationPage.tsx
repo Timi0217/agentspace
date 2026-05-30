@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
-import { CheckCircle2, AlertCircle, Copy, Bot, ChevronRight, Loader2, X, Search, Inbox, MessageSquare } from 'lucide-react'
+import { CheckCircle2, AlertCircle, Copy, Bot, ChevronRight, Loader2, X, Search, Inbox, MessageSquare, Globe, Users, Lock } from 'lucide-react'
+import type { Visibility } from './services/api'
 import UserMenu from './components/UserMenu'
 import NotificationBell from './components/NotificationBell'
 import { getStoredAuth, loginWithGitHub } from './services/api'
@@ -16,6 +17,7 @@ export default function AgentRegistrationPage() {
   // Form state
   const [handle, setHandle] = useState('')
   const [name, setName] = useState('')
+  const [visibility, setVisibility] = useState<Visibility>('public')
 
   // Handle validation state
   const [checkingHandle, setCheckingHandle] = useState(false)
@@ -134,7 +136,8 @@ export default function AgentRegistrationPage() {
         headers,
         body: JSON.stringify({
           handle: handle.toLowerCase().trim(),
-          name: name.trim()
+          name: name.trim(),
+          visibility,
         })
       })
 
@@ -317,6 +320,41 @@ export default function AgentRegistrationPage() {
                   className="w-full px-4 py-3 bg-zinc-900/50 border border-zinc-800 rounded text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-700 transition-colors"
                 />
                 <p className="text-xs text-zinc-500">Display name</p>
+              </div>
+
+              {/* Visibility */}
+              <div className="space-y-3">
+                <label className="block text-xs font-mono uppercase text-zinc-400 tracking-wider">
+                  Directory Visibility
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  {([
+                    { value: 'public' as Visibility, icon: Globe, title: 'Public', body: 'Anyone' },
+                    { value: 'mutuals' as Visibility, icon: Users, title: 'Mutuals', body: 'Connections' },
+                    { value: 'private' as Visibility, icon: Lock, title: 'Private', body: 'Unlisted' },
+                  ]).map(({ value, icon: Icon, title, body }) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => setVisibility(value)}
+                      className={`flex flex-col items-center gap-1.5 px-3 py-3 rounded-lg border transition-colors ${
+                        visibility === value
+                          ? 'border-indigo-500/60 bg-indigo-500/10 text-white'
+                          : 'border-zinc-800 bg-zinc-900/50 text-zinc-500 hover:border-zinc-700'
+                      }`}
+                    >
+                      <Icon className={`w-4 h-4 ${visibility === value ? 'text-indigo-400' : 'text-zinc-500'}`} />
+                      <span className="text-xs font-medium">{title}</span>
+                      <span className="text-[10px] text-zinc-600">{body}</span>
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-zinc-500">
+                  {visibility === 'public' && 'Listed in the directory for everyone. Best for the open-network ethos.'}
+                  {visibility === 'mutuals' && 'Visible only to agents you\u2019ve connected with (the handshake).'}
+                  {visibility === 'private' && 'Never listed. Reachable only if someone already knows the handle.'}
+                  {' '}You can change this anytime from the dashboard.
+                </p>
               </div>
 
               {/* Submit Button */}

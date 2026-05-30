@@ -52,6 +52,8 @@ class RegisterAgentRequest(BaseModel):
 class GenerateRegistrationTokenRequest(BaseModel):
     handle: str
     name: str
+    # Default discovery visibility for the agent this token provisions.
+    visibility: str = "public"
 
 
 class RedeemStartRequest(BaseModel):
@@ -494,6 +496,8 @@ async def generate_registration_token(
         token = f"chekk_reg_{uuid.uuid4().hex[:32]}"
         expires_at = datetime.utcnow() + timedelta(minutes=10)
 
+        visibility = payload.visibility if payload.visibility in {"public", "mutuals", "private"} else "public"
+
         # Create registration token. The token (and the agent it provisions) is
         # owned by the authenticated GitHub user.
         registration_token = RegistrationToken(
@@ -501,6 +505,7 @@ async def generate_registration_token(
             user_id=current_user.id,
             handle=normalized_handle,
             name=payload.name,
+            visibility=visibility,
             expires_at=expires_at
         )
 
@@ -615,7 +620,8 @@ async def redeem_registration_token_complete(
             webhook_url="",  # polling-first: no webhook
             manifest_url=payload.manifest_url,
             capabilities=card,
-            created_by_user_id=token_record.user_id
+            created_by_user_id=token_record.user_id,
+            visibility=getattr(token_record, "visibility", "public") or "public",
         )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -641,15 +647,23 @@ async def redeem_registration_token_complete(
 async def list_agents(
     search: Optional[str] = None, capability: Optional[str] = None,
     status_filter: Optional[AgentStatus] = None, offset: int = 0, limit: int = 50,
+    current_agent: Optional[GatewayAgent] = Depends(get_optional_agent),
     db: Session = Depends(get_db)
 ):
     """
-    List all agents with optional filtering by search, capability, or status.
-    Returns capability cards for each agent.
+    List agents for discovery, filtered by search, capability, or status.
+
+    Results are scoped by each agent's visibility setting relative to the caller:
+      - public agents are visible to everyone (incl. anonymous web viewers)
+      - mutuals-only agents are visible only when the caller is an authenticated
+        agent with an accepted connection to them
+      - private agents are never listed
     """
+    viewer_agent_id = str(current_agent.id) if current_agent else None
     service = AgentService(db)
     agents = await service.list_agents(
-        search=search, capability=capability, status=status_filter, offset=offset, limit=limit
+        search=search, capability=capability, status=status_filter,
+        offset=offset, limit=limit, viewer_agent_id=viewer_agent_id,
     )
     return [agent_to_dict(agent) for agent in agents]
 
@@ -673,6 +687,19 @@ async def list_my_agents(
     return {"agents": result}
 
 
+@router.get("/agents/by-handle/{handle}")
+async def get_agent_by_handle(handle: str, db: Session = Depends(get_db)):
+    """Resolve an agent profile by handle (used by the public directory detail page)."""
+    normalized = handle.lstrip("@").lower().strip()
+    agent = db.query(GatewayAgent).filter(
+        GatewayAgent.handle == normalized,
+        GatewayAgent.is_active == True,
+    ).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return agent_to_dict(agent)
+
+
 @router.get("/agents/{agent_id}")
 async def get_agent(agent_id: str, db: Session = Depends(get_db)):
     """Get agent profile and capability card."""
@@ -687,7 +714,10 @@ async def get_agent(agent_id: str, db: Session = Depends(get_db)):
 # api_key_hash, is_active, rate limits, etc.) is off-limits via this route.
 AGENT_SELF_UPDATABLE_FIELDS = {
     "webhook_url", "manifest_url", "avatar_url", "name", "capabilities", "policy",
+    "visibility",
 }
+
+VALID_VISIBILITY = {"public", "mutuals", "private"}
 
 
 @router.patch("/agents/{agent_id}")
@@ -704,6 +734,13 @@ async def update_agent(
     safe profile fields) or as a human user who owns the agent.
     """
     is_self = current_agent is not None and str(current_agent.id) == str(agent_id)
+
+    # Validate the visibility tier if present (applies to both self and owner edits).
+    if "visibility" in updates and updates["visibility"] not in VALID_VISIBILITY:
+        raise HTTPException(
+            status_code=422,
+            detail=f"visibility must be one of: {', '.join(sorted(VALID_VISIBILITY))}",
+        )
 
     if is_self:
         # Restrict an agent to safe self-service fields.
@@ -744,10 +781,12 @@ async def deactivate_agent(
 
 @router.get("/agents/search")
 async def search_agents(query: str, capability_filter: Optional[List[str]] = None,
+                       current_agent: Optional[GatewayAgent] = Depends(get_optional_agent),
                        db: Session = Depends(get_db)):
-    """Search agents by handle, name, or capability."""
+    """Search agents by handle, name, or capability (visibility-scoped)."""
+    viewer_agent_id = str(current_agent.id) if current_agent else None
     service = AgentService(db)
-    agents = await service.search_agents(query, capability_filter)
+    agents = await service.search_agents(query, capability_filter, viewer_agent_id=viewer_agent_id)
     return [agent_to_dict(agent) for agent in agents]
 
 
@@ -1632,6 +1671,7 @@ def agent_to_dict(agent: GatewayAgent) -> dict:
         "id": str(agent.id),
         "handle": agent.handle,
         "name": agent.name,
+        "description": agent.description,
         "avatar_url": agent.avatar_url,
         "manifest_url": agent.manifest_url,
         "capability_card": agent.capabilities,
@@ -1640,6 +1680,7 @@ def agent_to_dict(agent: GatewayAgent) -> dict:
         "tags": card.get("tags") or [],
         "policy": agent.policy,
         "status": agent.status.value,
+        "visibility": getattr(agent, "visibility", "public") or "public",
         "last_seen": agent.last_seen,
         "rate_limit_per_hour": agent.rate_limit_per_hour,
         "created_at": agent.created_at

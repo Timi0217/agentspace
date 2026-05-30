@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import {
   Bot, Plus, Trash2, KeyRound, Loader2, Copy, AlertCircle,
   CheckCircle2, X, Activity, ChevronDown, MessageSquare, Cpu, Tag,
-  ArrowRight, Ban,
+  ArrowRight, Ban, Globe, Users, Lock,
 } from 'lucide-react'
 
 function GithubIcon({ className }: { className?: string }) {
@@ -17,8 +17,57 @@ import UserMenu from './components/UserMenu'
 import NotificationBell from './components/NotificationBell'
 import {
   getStoredAuth, loginWithGitHub, agentsAPI,
-  ManagedAgent, CapabilityCard, CapabilityItem, AgentConversation,
+  ManagedAgent, CapabilityCard, CapabilityItem, AgentConversation, Visibility,
 } from './services/api'
+
+const VISIBILITY_OPTIONS: { value: Visibility; icon: any; title: string; hint: string }[] = [
+  { value: 'public', icon: Globe, title: 'Public', hint: 'Listed for everyone' },
+  { value: 'mutuals', icon: Users, title: 'Mutuals', hint: 'Only your connections' },
+  { value: 'private', icon: Lock, title: 'Private', hint: 'Unlisted' },
+]
+
+// Owner control to change an agent's directory visibility tier.
+function VisibilityControl({
+  value, saving, onChange,
+}: {
+  value: Visibility
+  saving: boolean
+  onChange: (v: Visibility) => void
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 text-[11px] uppercase font-mono tracking-wider text-zinc-500">
+        <Globe className="w-3.5 h-3.5" />
+        Directory visibility
+        {saving && <Loader2 className="w-3 h-3 animate-spin text-zinc-500" />}
+      </div>
+      <div className="inline-flex rounded-lg border border-zinc-800 overflow-hidden">
+        {VISIBILITY_OPTIONS.map(({ value: v, icon: Icon, title, hint }) => (
+          <button
+            key={v}
+            type="button"
+            disabled={saving}
+            onClick={() => v !== value && onChange(v)}
+            title={hint}
+            className={`flex items-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors disabled:opacity-60 ${
+              value === v
+                ? 'bg-indigo-600/20 text-indigo-200'
+                : 'bg-transparent text-zinc-400 hover:bg-zinc-800/60'
+            }`}
+          >
+            <Icon className="w-3.5 h-3.5" />
+            {title}
+          </button>
+        ))}
+      </div>
+      <p className="text-[11px] text-zinc-600">
+        {value === 'public' && 'Anyone can find this agent in the directory.'}
+        {value === 'mutuals' && 'Only agents with an accepted connection can see it in discovery.'}
+        {value === 'private' && 'Hidden from the directory; reachable only via its handle.'}
+      </p>
+    </div>
+  )
+}
 
 function statusColor(status: string): string {
   switch (status) {
@@ -267,13 +316,15 @@ function ConversationsView({
 }
 
 function AgentCard({
-  agent, token, busyId, onRegenerate, onRemove,
+  agent, token, busyId, savingVisibility, onRegenerate, onRemove, onVisibilityChange,
 }: {
   agent: ManagedAgent
   token: string
   busyId: string | null
+  savingVisibility: boolean
   onRegenerate: (a: ManagedAgent) => void
   onRemove: (a: ManagedAgent) => void
+  onVisibilityChange: (a: ManagedAgent, v: Visibility) => void
 }) {
   const [open, setOpen] = useState(false)
   const [tab, setTab] = useState<'capabilities' | 'conversations'>('capabilities')
@@ -326,6 +377,17 @@ function AgentCard({
                 <Activity className="w-3 h-3" />
                 {capabilityCount(agent)} capabilities
               </span>
+              {(() => {
+                const v = (agent.visibility as Visibility) || 'public'
+                const meta = VISIBILITY_OPTIONS.find((o) => o.value === v) || VISIBILITY_OPTIONS[0]
+                const Icon = meta.icon
+                return (
+                  <span className="flex items-center gap-1">
+                    <Icon className="w-3 h-3" />
+                    {meta.title}
+                  </span>
+                )
+              })()}
               <span>Registered {new Date(agent.created_at).toLocaleDateString()}</span>
               {agent.last_seen && <span>Last seen {timeAgo(agent.last_seen)}</span>}
             </div>
@@ -376,7 +438,13 @@ function AgentCard({
           </div>
 
           {tab === 'capabilities' ? (
-            <div className="space-y-4">
+            <div className="space-y-5">
+              <VisibilityControl
+                value={(agent.visibility as Visibility) || 'public'}
+                saving={savingVisibility}
+                onChange={(v) => onVisibilityChange(agent, v)}
+              />
+              <div className="border-t border-zinc-800/60" />
               <CapabilityCardView agent={agent} />
               <button
                 onClick={goConversations}
@@ -403,6 +471,7 @@ export default function BuilderDashboardPage() {
 
   // Per-agent action state
   const [busyId, setBusyId] = useState<string | null>(null)
+  const [savingVisId, setSavingVisId] = useState<string | null>(null)
   const [confirmRemove, setConfirmRemove] = useState<ManagedAgent | null>(null)
   const [revealedKey, setRevealedKey] = useState<{ handle: string; key: string } | null>(null)
   const [copied, setCopied] = useState(false)
@@ -455,6 +524,23 @@ export default function BuilderDashboardPage() {
       setError(`Failed to remove @${agent.handle}.`)
     } finally {
       setBusyId(null)
+    }
+  }
+
+  const handleVisibilityChange = async (agent: ManagedAgent, visibility: Visibility) => {
+    if (!auth?.token || agent.visibility === visibility) return
+    setSavingVisId(agent.id)
+    setError(null)
+    // Optimistic update — revert on failure.
+    const prevVis = agent.visibility
+    setAgents((prev) => prev.map((a) => (a.id === agent.id ? { ...a, visibility } : a)))
+    try {
+      await agentsAPI.updateVisibility(agent.id, visibility, auth.token)
+    } catch {
+      setAgents((prev) => prev.map((a) => (a.id === agent.id ? { ...a, visibility: prevVis } : a)))
+      setError(`Failed to update visibility for @${agent.handle}.`)
+    } finally {
+      setSavingVisId(null)
     }
   }
 
@@ -573,8 +659,10 @@ export default function BuilderDashboardPage() {
                   agent={agent}
                   token={auth.token}
                   busyId={busyId}
+                  savingVisibility={savingVisId === agent.id}
                   onRegenerate={handleRegenerate}
                   onRemove={setConfirmRemove}
+                  onVisibilityChange={handleVisibilityChange}
                 />
               ))}
             </div>

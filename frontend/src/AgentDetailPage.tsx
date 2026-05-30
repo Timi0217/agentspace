@@ -1,34 +1,43 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { ArrowLeft, Loader2, ExternalLink, Clock, Activity, Zap } from 'lucide-react'
-import { registryAPI, RegistryAgent } from './services/api'
+import { ArrowLeft, Loader2, Activity, Clock, Globe, Users, Lock } from 'lucide-react'
+import { directoryAPI, DirectoryAgent, CapabilityItem } from './services/api'
 
 export default function AgentDetailPage() {
   const { handle } = useParams<{ handle: string }>()
-  const [agent, setAgent] = useState<RegistryAgent | null>(null)
+  const [agent, setAgent] = useState<DirectoryAgent | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
   useEffect(() => {
     if (!handle) return
     setLoading(true)
-    registryAPI
-      .getAgent(handle.replace(/^@/, ''))
-      .then((res) => setAgent(res.agent))
+    directoryAPI
+      .getByHandle(handle.replace(/^@/, ''))
+      .then((res) => {
+        if (res.agent) setAgent(res.agent)
+        else setError('Agent not found')
+      })
       .catch(() => setError('Agent not found'))
       .finally(() => setLoading(false))
   }, [handle])
 
   const statusDot = (s: string) => {
     if (s === 'online') return 'bg-emerald-400'
-    if (s === 'probation') return 'bg-amber-400'
+    if (s === 'idle' || s === 'busy') return 'bg-amber-400'
     return 'bg-zinc-600'
   }
 
   const statusBadge = (s: string) => {
     if (s === 'online') return 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
-    if (s === 'probation') return 'text-amber-400 bg-amber-500/10 border-amber-500/20'
+    if (s === 'idle' || s === 'busy') return 'text-amber-400 bg-amber-500/10 border-amber-500/20'
     return 'text-zinc-500 bg-zinc-500/10 border-zinc-500/20'
+  }
+
+  const visibilityMeta = (v?: string) => {
+    if (v === 'mutuals') return { icon: Users, label: 'Mutuals only', cls: 'text-sky-400' }
+    if (v === 'private') return { icon: Lock, label: 'Private', cls: 'text-zinc-400' }
+    return { icon: Globe, label: 'Public', cls: 'text-emerald-400' }
   }
 
   if (loading) {
@@ -52,7 +61,7 @@ export default function AgentDetailPage() {
     )
   }
 
-  const timeAgo = (iso: string | null) => {
+  const timeAgo = (iso?: string | null) => {
     if (!iso) return 'never'
     const diff = Date.now() - new Date(iso).getTime()
     const mins = Math.floor(diff / 60000)
@@ -63,6 +72,15 @@ export default function AgentDetailPage() {
     const days = Math.floor(hrs / 24)
     return `${days}d ago`
   }
+
+  const vis = visibilityMeta(agent.visibility)
+  const VisIcon = vis.icon
+  const card = agent.capability_card || {}
+  const richCaps: CapabilityItem[] = Array.isArray(card.capabilities)
+    ? (card.capabilities.filter((c) => typeof c === 'object') as CapabilityItem[])
+    : []
+  const scopeWill = card.scope?.will || []
+  const scopeWont = card.scope?.wont || []
 
   return (
     <div className="min-h-screen bg-zinc-950 text-white">
@@ -90,12 +108,9 @@ export default function AgentDetailPage() {
           <div>
             <div className="flex items-center gap-2.5 mb-2">
               <span className={`w-2.5 h-2.5 rounded-full ${statusDot(agent.status)}`} />
-              <h2 className="text-xl sm:text-2xl font-bold text-white font-mono">{agent.handle}</h2>
+              <h2 className="text-xl sm:text-2xl font-bold text-white font-mono">@{agent.handle}</h2>
             </div>
             <div className="text-sm text-zinc-400">{agent.name}</div>
-            {agent.builder_name && (
-              <div className="text-xs text-zinc-600 mt-1">Built by {agent.builder_name}</div>
-            )}
           </div>
           <span className={`text-[10px] font-medium px-2 py-1 rounded-lg border uppercase tracking-wide ${statusBadge(agent.status)}`}>
             {agent.status}
@@ -110,7 +125,7 @@ export default function AgentDetailPage() {
         )}
 
         {/* Stats grid */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-8">
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-8">
           <div className="rounded-xl border border-zinc-800/60 bg-zinc-900/30 p-4">
             <div className="flex items-center gap-1.5 text-zinc-600 mb-2">
               <Activity className="w-3 h-3" />
@@ -120,31 +135,42 @@ export default function AgentDetailPage() {
           </div>
           <div className="rounded-xl border border-zinc-800/60 bg-zinc-900/30 p-4">
             <div className="flex items-center gap-1.5 text-zinc-600 mb-2">
-              <Zap className="w-3 h-3" />
-              <span className="text-[10px] uppercase tracking-wide">Latency</span>
+              <VisIcon className="w-3 h-3" />
+              <span className="text-[10px] uppercase tracking-wide">Visibility</span>
             </div>
-            <div className="text-sm font-semibold text-white">
-              {agent.last_probe_latency_ms != null ? `${agent.last_probe_latency_ms}ms` : '--'}
-            </div>
-          </div>
-          <div className="rounded-xl border border-zinc-800/60 bg-zinc-900/30 p-4">
-            <div className="flex items-center gap-1.5 text-zinc-600 mb-2">
-              <ExternalLink className="w-3 h-3" />
-              <span className="text-[10px] uppercase tracking-wide">Relay calls</span>
-            </div>
-            <div className="text-sm font-semibold text-white">{agent.total_relay_calls.toLocaleString()}</div>
+            <div className={`text-sm font-semibold ${vis.cls}`}>{vis.label}</div>
           </div>
           <div className="rounded-xl border border-zinc-800/60 bg-zinc-900/30 p-4">
             <div className="flex items-center gap-1.5 text-zinc-600 mb-2">
               <Clock className="w-3 h-3" />
-              <span className="text-[10px] uppercase tracking-wide">Last probe</span>
+              <span className="text-[10px] uppercase tracking-wide">Last seen</span>
             </div>
-            <div className="text-sm font-semibold text-white">{timeAgo(agent.last_probe_at)}</div>
+            <div className="text-sm font-semibold text-white">{timeAgo(agent.last_seen)}</div>
           </div>
         </div>
 
         {/* Capabilities */}
-        {agent.capabilities && agent.capabilities.length > 0 && (
+        {richCaps.length > 0 ? (
+          <div className="mb-8">
+            <h3 className="text-xs font-medium text-zinc-500 uppercase tracking-wider mb-3">Capabilities</h3>
+            <div className="space-y-2">
+              {richCaps.map((cap) => (
+                <div key={cap.name} className="rounded-xl border border-zinc-800/60 bg-zinc-900/30 p-4">
+                  <div className="text-sm font-mono text-indigo-400">{cap.name}</div>
+                  {cap.description && (
+                    <p className="text-xs text-zinc-500 mt-1 leading-relaxed">{cap.description}</p>
+                  )}
+                  {(cap.inputs?.length || cap.output) && (
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-[10px] font-mono text-zinc-600">
+                      {cap.inputs?.length ? <span>in: {cap.inputs.join(', ')}</span> : null}
+                      {cap.output ? <span>out: {cap.output}</span> : null}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : agent.capabilities && agent.capabilities.length > 0 ? (
           <div className="mb-8">
             <h3 className="text-xs font-medium text-zinc-500 uppercase tracking-wider mb-3">Capabilities</h3>
             <div className="flex flex-wrap gap-2">
@@ -159,53 +185,64 @@ export default function AgentDetailPage() {
               ))}
             </div>
           </div>
-        )}
+        ) : null}
 
-        {/* Pricing */}
-        {agent.pricing && (
+        {/* Access surface */}
+        {agent.access_surface && agent.access_surface.length > 0 && (
           <div className="mb-8">
-            <h3 className="text-xs font-medium text-zinc-500 uppercase tracking-wider mb-3">Pricing</h3>
-            <div className="rounded-xl border border-zinc-800/60 bg-zinc-900/30 p-4">
-              <span className="text-sm text-zinc-300">{agent.pricing}</span>
-              {agent.price_per_call_usd && (
-                <span className="text-xs text-zinc-600 ml-2">({agent.price_per_call_usd} per call)</span>
-              )}
+            <h3 className="text-xs font-medium text-zinc-500 uppercase tracking-wider mb-3">Access surface</h3>
+            <div className="flex flex-wrap gap-2">
+              {agent.access_surface.map((a) => (
+                <span key={a} className="text-xs font-mono px-3 py-1.5 rounded-lg bg-zinc-900 text-zinc-400 border border-zinc-800/60">
+                  {a}
+                </span>
+              ))}
             </div>
           </div>
         )}
 
-        {/* Integration info */}
+        {/* Scope */}
+        {(scopeWill.length > 0 || scopeWont.length > 0) && (
+          <div className="mb-8 grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {scopeWill.length > 0 && (
+              <div className="rounded-xl border border-emerald-900/40 bg-emerald-950/10 p-4">
+                <div className="text-[10px] uppercase tracking-wider text-emerald-500 mb-2">Will</div>
+                <ul className="space-y-1">
+                  {scopeWill.map((s) => <li key={s} className="text-xs text-zinc-400">{s}</li>)}
+                </ul>
+              </div>
+            )}
+            {scopeWont.length > 0 && (
+              <div className="rounded-xl border border-red-900/40 bg-red-950/10 p-4">
+                <div className="text-[10px] uppercase tracking-wider text-red-500 mb-2">Won't</div>
+                <ul className="space-y-1">
+                  {scopeWont.map((s) => <li key={s} className="text-xs text-zinc-400">{s}</li>)}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Reach this agent */}
         <div className="mb-8">
-          <h3 className="text-xs font-medium text-zinc-500 uppercase tracking-wider mb-3">Use this agent</h3>
+          <h3 className="text-xs font-medium text-zinc-500 uppercase tracking-wider mb-3">Reach this agent</h3>
           <div className="rounded-xl border border-zinc-800/60 bg-zinc-900/30 p-4 space-y-3">
-            <div>
-              <div className="text-[10px] text-zinc-600 uppercase tracking-wider mb-1">Relay endpoint</div>
-              <code className="text-xs font-mono text-zinc-400 break-all">
-                POST /api/v1/registry/relay
-              </code>
-            </div>
-            <div className="border-t border-zinc-800/40 pt-3">
-              <div className="text-[10px] text-zinc-600 uppercase tracking-wider mb-1.5">Example payload</div>
-              <pre className="text-[11px] font-mono text-zinc-500 bg-zinc-950 rounded-lg p-3 overflow-x-auto">
-{`{
-  "from_handle": "your-agent",
-  "to_handle": "${agent.handle.replace('@', '')}",
-  "message": {
-    "request": "your query here"
-  }
-}`}
-              </pre>
-            </div>
+            <p className="text-xs text-zinc-500">
+              Agents reach each other by sending a message into a shared room over the gateway. Address it by handle:
+            </p>
+            <pre className="text-[11px] font-mono text-zinc-500 bg-zinc-950 rounded-lg p-3 overflow-x-auto">
+{`POST /api/v1/gateway/rooms/{room_id}/messages
+Authorization: Bearer <your-api-key>
+
+{ "to_handle": "${agent.handle.replace('@', '')}", "body": "your request" }`}
+            </pre>
           </div>
         </div>
 
         {/* Metadata */}
         <div className="border-t border-zinc-800/40 pt-6">
           <div className="flex flex-wrap gap-x-6 gap-y-2 text-[11px] text-zinc-600">
-            {agent.is_chekk_native && (
-              <span className="text-indigo-500">Chekk Native Agent</span>
-            )}
-            <span>Created {new Date(agent.created_at).toLocaleDateString()}</span>
+            {agent.created_at && <span>Created {new Date(agent.created_at).toLocaleDateString()}</span>}
             <span>ID: {agent.id.slice(0, 8)}</span>
           </div>
         </div>

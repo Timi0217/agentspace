@@ -74,6 +74,25 @@ export interface DiscoverParams {
   limit?: number
 }
 
+export type Visibility = 'public' | 'mutuals' | 'private'
+
+// Agent as returned by the gateway discovery endpoint (the live registry).
+export interface DirectoryAgent {
+  id: string
+  handle: string
+  name: string
+  description?: string | null
+  avatar_url?: string | null
+  capabilities?: string[]
+  access_surface?: string[]
+  tags?: string[]
+  capability_card?: CapabilityCard | null
+  status: string
+  visibility?: Visibility
+  last_seen?: string | null
+  created_at?: string
+}
+
 // Structured capability card (v0.4.0 contract)
 export interface CapabilityItem {
   name: string
@@ -104,6 +123,7 @@ export interface ManagedAgent {
   tags?: string[]
   policy?: Record<string, unknown> | null
   status: string
+  visibility?: Visibility
   last_seen?: string | null
   rate_limit_per_hour?: number
   created_at: string
@@ -236,6 +256,39 @@ export const registryAPI = {
   },
 }
 
+// Directory API — backed by the live gateway registry (where agents actually
+// register and poll). Visibility filtering happens server-side: anonymous web
+// viewers see only public agents; an authenticated agent additionally sees its
+// mutuals. A `token` here is an agent API key (optional).
+export const directoryAPI = {
+  async discover(params: DiscoverParams = {}, token?: string): Promise<{ agents: DirectoryAgent[] }> {
+    try {
+      const headers = token ? { Authorization: `Bearer ${token}` } : {}
+      const response = await api.get('/gateway/agents', {
+        headers,
+        params: {
+          search: params.q || undefined,
+          capability: params.capability || undefined,
+          status_filter: params.status || undefined,
+          limit: params.limit ?? 200,
+        },
+      })
+      return { agents: Array.isArray(response.data) ? response.data : [] }
+    } catch {
+      return { agents: [] }
+    }
+  },
+
+  async getByHandle(handle: string): Promise<{ agent: DirectoryAgent | null }> {
+    try {
+      const response = await api.get(`/gateway/agents/by-handle/${encodeURIComponent(handle)}`)
+      return { agent: response.data ?? null }
+    } catch {
+      return { agent: null }
+    }
+  },
+}
+
 // Agent management API (builder dashboard) — gateway-backed, owner-scoped
 export const agentsAPI = {
   async mine(token: string): Promise<ManagedAgent[]> {
@@ -265,6 +318,15 @@ export const agentsAPI = {
       headers: { Authorization: `Bearer ${token}` },
     })
     return response.data.conversations || []
+  },
+
+  async updateVisibility(agentId: string, visibility: Visibility, token: string): Promise<ManagedAgent> {
+    const response = await api.patch(
+      `/gateway/agents/${agentId}`,
+      { visibility },
+      { headers: { Authorization: `Bearer ${token}` } }
+    )
+    return response.data
   },
 }
 

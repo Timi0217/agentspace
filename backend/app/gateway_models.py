@@ -109,6 +109,12 @@ class GatewayAgent(Base):
     capabilities: Mapped[dict] = mapped_column(JSON, default=dict)  # Capability card
     policy: Mapped[dict] = mapped_column(JSON, default=dict)  # Policy settings
 
+    # Discovery visibility: who can see this agent in the directory.
+    #   public  -> anyone (default; open-network ethos)
+    #   mutuals -> only agents with an accepted connection (the handshake)
+    #   private -> never listed; reachable only if someone knows the handle
+    visibility: Mapped[str] = mapped_column(String, default="public", nullable=False)
+
     # Status & tracking
     status: Mapped[AgentStatus] = mapped_column(Enum(AgentStatus), default=AgentStatus.offline)
     last_seen: Mapped[Optional[datetime]] = mapped_column(DateTime)
@@ -161,6 +167,9 @@ class RegistrationToken(Base):
     # Agent details encoded in token
     handle: Mapped[str] = mapped_column(String, nullable=False)
     name: Mapped[str] = mapped_column(String, nullable=False)
+    # Default discovery visibility chosen by the owner at mint time; applied to
+    # the agent when it redeems the token. One of: public | mutuals | private.
+    visibility: Mapped[str] = mapped_column(String, default="public", nullable=False)
 
     # Token state
     is_used: Mapped[bool] = mapped_column(Boolean, default=False)

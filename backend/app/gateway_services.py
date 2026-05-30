@@ -236,7 +236,8 @@ class AgentService:
                           manifest_url: Optional[str] = None,
                           capabilities: Optional[dict] = None,
                           policy: Optional[dict] = None,
-                          created_by_user_id: Optional[str] = None) -> tuple[GatewayAgent, str]:
+                          created_by_user_id: Optional[str] = None,
+                          visibility: str = "public") -> tuple[GatewayAgent, str]:
         """Create a new agent. Returns (agent, api_key) tuple."""
         # Reclaim a released handle if one exists; otherwise reject duplicates.
         existing = self.db.query(GatewayAgent).filter(GatewayAgent.handle == handle).first()
@@ -262,6 +263,7 @@ class AgentService:
             capabilities=capabilities or {},
             policy=policy or {},
             status=AgentStatus.offline,
+            visibility=visibility if visibility in ("public", "mutuals", "private") else "public",
             api_key_hash=api_key_hash,
             first_poll_deadline=now + DORMANT_AFTER,
         )
@@ -307,12 +309,52 @@ class AgentService:
             .all()
         )
 
+    def _mutual_agent_ids(self, viewer_agent_id: Optional[str]) -> set:
+        """Set of agent ids the viewer has an *accepted* connection with."""
+        if not viewer_agent_id:
+            return set()
+        conns = self.db.query(Connection).filter(
+            or_(
+                Connection.agent_a_id == viewer_agent_id,
+                Connection.agent_b_id == viewer_agent_id,
+            ),
+            Connection.status == ConnectionStatus.accepted,
+        ).all()
+        ids = set()
+        for c in conns:
+            ids.add(str(c.agent_a_id))
+            ids.add(str(c.agent_b_id))
+        return ids
+
+    def _filter_by_visibility(self, agents: List[GatewayAgent],
+                              viewer_agent_id: Optional[str]) -> List[GatewayAgent]:
+        """Apply the visibility tiers relative to the requesting agent.
+
+          public  -> always shown
+          mutuals -> shown only to the agent itself or its accepted connections
+          private -> never shown in discovery
+        """
+        mutual_ids = self._mutual_agent_ids(viewer_agent_id)
+        out: List[GatewayAgent] = []
+        for a in agents:
+            vis = getattr(a, "visibility", "public") or "public"
+            if vis == "public":
+                out.append(a)
+            elif vis == "mutuals":
+                if viewer_agent_id and (
+                    str(a.id) == str(viewer_agent_id) or str(a.id) in mutual_ids
+                ):
+                    out.append(a)
+            # private: omitted from discovery entirely
+        return out
+
     async def list_agents(self, search: Optional[str] = None,
                          capability: Optional[str] = None,
                          status: Optional[AgentStatus] = None,
                          offset: int = 0,
-                         limit: int = 50) -> List[GatewayAgent]:
-        """List agents with optional filtering."""
+                         limit: int = 50,
+                         viewer_agent_id: Optional[str] = None) -> List[GatewayAgent]:
+        """List agents with optional filtering, scoped by visibility tiers."""
         query = self.db.query(GatewayAgent).filter(GatewayAgent.is_active == True)
 
         if search:
@@ -332,12 +374,15 @@ class AgentService:
             agents = [a for a in agents if card_matches_capability(a.capabilities, capability)]
         # Hide dormant/released agents from discovery (lazy evaluation).
         visible = [a for a in agents if evaluate_lifecycle(a) == "active"]
+        # Respect each agent's chosen visibility relative to the viewer's graph.
+        visible = self._filter_by_visibility(visible, viewer_agent_id)
         self.db.commit()  # persist any dormant_since bookkeeping
         return visible
 
     async def search_agents(self, query_str: str,
-                           capability_filter: Optional[List[str]] = None) -> List[GatewayAgent]:
-        """Search agents by handle, name, or capability."""
+                           capability_filter: Optional[List[str]] = None,
+                           viewer_agent_id: Optional[str] = None) -> List[GatewayAgent]:
+        """Search agents by handle, name, or capability, scoped by visibility."""
         query = self.db.query(GatewayAgent).filter(
             or_(
                 GatewayAgent.handle.ilike(f"%{query_str}%"),
@@ -357,6 +402,8 @@ class AgentService:
 
         # Hide dormant/released agents from discovery (lazy evaluation).
         agents = [a for a in agents if evaluate_lifecycle(a) == "active"]
+        # Respect each agent's chosen visibility relative to the viewer's graph.
+        agents = self._filter_by_visibility(agents, viewer_agent_id)
         self.db.commit()
         return agents
 
