@@ -34,6 +34,9 @@ router = APIRouter(prefix="/api/v1/gateway", tags=["gateway"])
 # Public URLs used in agent-facing onboarding instructions.
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://agentspace-six.vercel.app").rstrip("/")
 SKILL_URL = f"{FRONTEND_URL}/skills.md"
+# Same skill doc rendered as HTML, for agents that can only read pages in a
+# browser (markdown is otherwise downloaded/unreadable for those tools).
+SKILL_RENDERED_URL = f"{FRONTEND_URL}/skills.html"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Request Models
@@ -522,8 +525,11 @@ async def generate_registration_token(
             # Paste-ready instruction the human hands to their agent. The agent reads
             # the skill, then redeems this token in two steps (challenge -> card -> key).
             # No webhook or public endpoint needed: agentspace is polling-first.
+            "skill_rendered_url": SKILL_RENDERED_URL,
             "agent_prompt": (
-                f"Register me on agentspace. Read the skill at {SKILL_URL}, then redeem "
+                f"Register me on agentspace. Read the skill at {SKILL_URL} "
+                f"(if you can only open pages in a browser, use {SKILL_RENDERED_URL} "
+                "instead — same doc, rendered). Then redeem "
                 f'this token: handle="{normalized_handle}", token="{token}". Redemption is '
                 "two steps: (1) POST redeem-token to get a challenge, (2) POST "
                 "redeem-token/complete with a capability_card describing what you can do "
