@@ -172,37 +172,74 @@ class GatewayService:
 # Agent Service
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+# Dormancy lifecycle thresholds (lazy, evaluated on access — no background worker).
+DORMANT_AFTER = timedelta(days=7)    # no poll within this window -> dormant
+RELEASE_AFTER = timedelta(days=30)   # dormant for this long -> handle released
+
+
+def evaluate_lifecycle(agent: "GatewayAgent", now: Optional[datetime] = None) -> str:
+    """Return the lifecycle state of an agent: 'active' | 'dormant' | 'released'.
+
+    Mutates agent.dormant_since as a side effect (lazy bookkeeping) but does NOT
+    commit — callers commit if they persist other changes. Rules:
+      - deadline = last_poll_at (or created_at) + 7d
+      - now < deadline           -> active   (clears dormant_since)
+      - now >= deadline          -> dormant, recorded at dormant_since
+      - dormant for > 30d        -> released (handle reclaimable)
+    """
+    now = now or datetime.utcnow()
+    base = agent.last_poll_at or agent.created_at or now
+    deadline = base + DORMANT_AFTER
+    if now < deadline:
+        if agent.dormant_since is not None:
+            agent.dormant_since = None
+        return "active"
+    # past the inactivity deadline -> dormant (record when it began)
+    if agent.dormant_since is None:
+        agent.dormant_since = deadline
+    if now - agent.dormant_since > RELEASE_AFTER:
+        return "released"
+    return "dormant"
+
+
 class AgentService:
     """Service for agent operations."""
 
     def __init__(self, db: Session):
         self.db = db
 
-    async def create_agent(self, handle: str, name: str, webhook_url: str,
+    async def create_agent(self, handle: str, name: str, webhook_url: str = "",
                           manifest_url: Optional[str] = None,
                           capabilities: Optional[dict] = None,
                           policy: Optional[dict] = None,
                           created_by_user_id: Optional[str] = None) -> tuple[GatewayAgent, str]:
         """Create a new agent. Returns (agent, api_key) tuple."""
-        # Check if handle already exists
+        # Reclaim a released handle if one exists; otherwise reject duplicates.
         existing = self.db.query(GatewayAgent).filter(GatewayAgent.handle == handle).first()
         if existing:
-            raise ValueError(f"Handle {handle} already exists")
+            if existing.is_active and evaluate_lifecycle(existing) != "released":
+                raise ValueError(f"Handle {handle} already exists")
+            # Released or inactive: free the handle so the new owner can claim it.
+            existing.is_active = False
+            existing.handle = f"{existing.handle}__released_{uuid.uuid4().hex[:8]}"
+            self.db.commit()
 
         # Generate API key before hashing
         api_key = self._generate_api_key()
         api_key_hash = self._hash_api_key(api_key)
 
+        now = datetime.utcnow()
         agent = GatewayAgent(
             id=str(uuid.uuid4()),
             handle=handle,
             name=name,
-            webhook_url=webhook_url,
+            webhook_url=webhook_url or "",
             manifest_url=manifest_url,
             capabilities=capabilities or {},
             policy=policy or {},
             status=AgentStatus.offline,
-            api_key_hash=api_key_hash
+            api_key_hash=api_key_hash,
+            first_poll_deadline=now + DORMANT_AFTER,
         )
         self.db.add(agent)
         self.db.commit()
@@ -223,6 +260,15 @@ class AgentService:
     async def get_agent(self, agent_id: str) -> Optional[GatewayAgent]:
         """Get agent by ID."""
         return self.db.query(GatewayAgent).filter(GatewayAgent.id == agent_id).first()
+
+    async def record_poll(self, agent: GatewayAgent):
+        """Mark an inbox poll: refresh activity and reactivate from dormancy."""
+        now = datetime.utcnow()
+        agent.last_poll_at = now
+        agent.last_seen = now
+        agent.dormant_since = None
+        agent.status = AgentStatus.online
+        self.db.commit()
 
     async def get_user_agents(self, user_id: str) -> List[GatewayAgent]:
         """List active agents owned by a user (via the UserAgent link), newest first."""
@@ -256,7 +302,11 @@ class AgentService:
         if status:
             query = query.filter(GatewayAgent.status == status)
 
-        return query.offset(offset).limit(limit).all()
+        agents = query.offset(offset).limit(limit).all()
+        # Hide dormant/released agents from discovery (lazy evaluation).
+        visible = [a for a in agents if evaluate_lifecycle(a) == "active"]
+        self.db.commit()  # persist any dormant_since bookkeeping
+        return visible
 
     async def search_agents(self, query_str: str,
                            capability_filter: Optional[List[str]] = None) -> List[GatewayAgent]:
@@ -278,6 +328,9 @@ class AgentService:
                 if any(cap in a.capabilities for cap in capability_filter)
             ]
 
+        # Hide dormant/released agents from discovery (lazy evaluation).
+        agents = [a for a in agents if evaluate_lifecycle(a) == "active"]
+        self.db.commit()
         return agents
 
     async def update_agent(self, agent_id: str, updates: dict,
@@ -525,43 +578,31 @@ class MessageService:
         self.db.add(message)
         self.db.commit()
 
-        # Create queue entry
-        queue_entry = MessageQueue(
-            id=str(uuid.uuid4()),
-            message_id=message.id
-        )
-        self.db.add(queue_entry)
-        self.db.commit()
-
+        # Polling-first: recipients pull via GET /inbox. No webhook queue entry.
         return message
 
-    async def queue_message(self, message_id: str):
+    async def get_inbox(self, agent_id: str, since: Optional[datetime],
+                        limit: int = 50) -> List[Message]:
+        """Messages addressed to this agent (across all rooms) after a cursor.
+
+        `since` is the created_at of the last message the agent saw. Ordered
+        oldest-first so the client can advance its cursor monotonically.
         """
-        Queue message for async webhook delivery.
-        This is called by background task after message is created.
-        """
-        message = self.db.query(Message).filter(Message.id == message_id).first()
-        if not message:
-            raise ValueError("Message not found")
+        q = self.db.query(Message).filter(Message.to_agent_id == agent_id)
+        if since is not None:
+            q = q.filter(Message.created_at > since)
+        return q.order_by(Message.created_at.asc()).limit(limit).all()
 
-        to_agent = self.db.query(GatewayAgent).filter(
-            GatewayAgent.id == message.to_agent_id
-        ).first()
-
-        if not to_agent:
-            raise ValueError("Recipient agent not found")
-
-        # Queue for delivery
-        queue_entry = self.db.query(MessageQueue).filter(
-            MessageQueue.message_id == message_id
-        ).first()
-
-        if not queue_entry:
-            queue_entry = MessageQueue(
-                id=str(uuid.uuid4()),
-                message_id=message_id
-            )
-            self.db.add(queue_entry)
+    async def mark_delivered(self, messages: List[Message]):
+        """Flip fetched messages to 'delivered' (delivered == read in v3)."""
+        now = datetime.utcnow()
+        changed = False
+        for m in messages:
+            if m.status == MessageStatus.queued:
+                m.status = MessageStatus.delivered
+                m.delivered_at = now
+                changed = True
+        if changed:
             self.db.commit()
 
     async def get_room_messages(self, room_id: str, offset: int = 0,

@@ -101,15 +101,24 @@ class GatewayAgent(Base):
     description: Mapped[Optional[str]] = mapped_column(Text)
     avatar_url: Mapped[Optional[str]] = mapped_column(String)
     manifest_url: Mapped[Optional[str]] = mapped_column(String)
-    webhook_url: Mapped[str] = mapped_column(String, nullable=False)
+    # Polling-first: agents pull their inbox, so a public webhook is optional.
+    # Stored as "" when absent (column is historically NOT NULL in older DBs).
+    webhook_url: Mapped[str] = mapped_column(String, nullable=True, default="")
 
     # Capabilities & metadata
-    capabilities: Mapped[dict] = mapped_column(JSON, default=dict)  # List of capabilities
+    capabilities: Mapped[dict] = mapped_column(JSON, default=dict)  # Capability card
     policy: Mapped[dict] = mapped_column(JSON, default=dict)  # Policy settings
 
     # Status & tracking
     status: Mapped[AgentStatus] = mapped_column(Enum(AgentStatus), default=AgentStatus.offline)
     last_seen: Mapped[Optional[datetime]] = mapped_column(DateTime)
+
+    # Polling lifecycle / dormancy (lazy, no background worker).
+    # first_poll_deadline = created_at + 7d. If an agent never polls /inbox by
+    # this time (or stops polling for 7d), it is dormant; dormant for 30d -> released.
+    last_poll_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    first_poll_deadline: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    dormant_since: Mapped[Optional[datetime]] = mapped_column(DateTime)
 
     # Rate limiting & costs
     rate_limit_per_hour: Mapped[int] = mapped_column(Integer, default=100)
@@ -156,6 +165,10 @@ class RegistrationToken(Base):
     # Token state
     is_used: Mapped[bool] = mapped_column(Boolean, default=False)
     used_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+
+    # 2-step challenge: step 1 (start) issues the capability-card challenge and
+    # sets a short (60s) window; step 2 (complete) must arrive before it expires.
+    challenge_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

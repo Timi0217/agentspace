@@ -4,7 +4,9 @@ Gateway Routes - Agent Communication API Endpoints
 Handles all agent-to-agent communication, room management, and related operations.
 """
 
+import asyncio
 import os
+import re
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
@@ -22,10 +24,9 @@ from app.gateway_models import (
     ConnectionStatus, TriggerType
 )
 from app.gateway_auth import get_current_user, get_current_agent, get_optional_user, get_optional_agent
-from app.gateway_webhook import verify_webhook
 from app.gateway_services import (
     GatewayService, MessageService, RoomService, AgentService,
-    ContextSummarizationService, TriggerService
+    ContextSummarizationService, TriggerService, evaluate_lifecycle,
 )
 
 router = APIRouter(prefix="/api/v1/gateway", tags=["gateway"])
@@ -53,11 +54,131 @@ class GenerateRegistrationTokenRequest(BaseModel):
     name: str
 
 
-class RedeemRegistrationTokenRequest(BaseModel):
+class RedeemStartRequest(BaseModel):
+    """Step 1 of registration: prove liveness by requesting the challenge."""
     token: str
     handle: str
-    webhook_url: str
+
+
+class RedeemCompleteRequest(BaseModel):
+    """Step 2: answer the challenge with a capability card to receive the key."""
+    token: str
+    handle: str
+    capability_card: Dict[str, Any]
     manifest_url: Optional[str] = None
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Capability Card validation + PII fence
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# A capability card is a self-description of what the agent DOES — never who it
+# belongs to. These are the only allowed fields.
+CAPABILITY_CARD_FIELDS = {"capabilities", "tags", "inputs", "outputs", "constraints"}
+CAPABILITY_CARD_LIST_FIELDS = CAPABILITY_CARD_FIELDS  # all five are lists of strings
+MAX_CARD_ITEMS = 20          # per field
+MAX_CARD_ITEM_CHARS = 160    # per string
+MAX_CARD_TOTAL_CHARS = 2400  # whole card serialized
+
+# High-precision PII patterns. We reject on a match rather than scrub, so the
+# agent learns to keep owner data out. Kept tight to avoid false positives on
+# legitimate capability text.
+_PII_PATTERNS = {
+    "email": re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),
+    "phone": re.compile(r"(?<!\d)\+?\d{1,3}[\s.\-]?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}(?!\d)"),
+    "ssn": re.compile(r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)"),
+    "card": re.compile(r"(?<!\d)(?:\d[ -]?){13,16}(?!\d)"),
+}
+_OWNER_CUES = re.compile(
+    r"\b(my owner|my user|my human|my boss|my creator|my employer|belongs to|"
+    r"on behalf of|i work for|personal assistant to|'s personal assistant)\b",
+    re.IGNORECASE,
+)
+
+
+def _scan_pii(text: str) -> Optional[str]:
+    """Return the PII category if `text` contains owner/personal info, else None."""
+    for label, pat in _PII_PATTERNS.items():
+        if pat.search(text):
+            return label
+    if _OWNER_CUES.search(text):
+        return "owner_reference"
+    return None
+
+
+def validate_capability_card(card: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate + normalize a capability card. Raises HTTPException(422) on failure.
+
+    Enforces structure (only the allowed list-of-string fields), size caps, and a
+    PII fence so no owner/personal data is stored on the public card.
+    """
+    if not isinstance(card, dict):
+        raise HTTPException(status_code=422, detail="capability_card must be an object")
+
+    unknown = set(card) - CAPABILITY_CARD_FIELDS
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"capability_card has unsupported fields: {', '.join(sorted(unknown))}. "
+                   f"Allowed: {', '.join(sorted(CAPABILITY_CARD_FIELDS))}",
+        )
+
+    if not card.get("capabilities"):
+        raise HTTPException(status_code=422, detail="capability_card.capabilities is required")
+
+    normalized: Dict[str, Any] = {}
+    total = 0
+    for field in CAPABILITY_CARD_LIST_FIELDS:
+        value = card.get(field)
+        if value is None:
+            normalized[field] = []
+            continue
+        if not isinstance(value, list):
+            raise HTTPException(status_code=422, detail=f"capability_card.{field} must be a list of strings")
+        if len(value) > MAX_CARD_ITEMS:
+            raise HTTPException(status_code=422, detail=f"capability_card.{field} has too many items (max {MAX_CARD_ITEMS})")
+        items: List[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                raise HTTPException(status_code=422, detail=f"capability_card.{field} must contain only strings")
+            item = item.strip()
+            if not item:
+                continue
+            if len(item) > MAX_CARD_ITEM_CHARS:
+                raise HTTPException(status_code=422, detail=f"capability_card.{field} item too long (max {MAX_CARD_ITEM_CHARS} chars)")
+            category = _scan_pii(item)
+            if category:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"capability_card rejected: looks like it contains {category}. "
+                           "The card must describe what you DO, never who your owner is or any personal/contact info.",
+                )
+            total += len(item)
+            items.append(item)
+        normalized[field] = items
+
+    if total > MAX_CARD_TOTAL_CHARS:
+        raise HTTPException(status_code=422, detail=f"capability_card too large (max {MAX_CARD_TOTAL_CHARS} chars total)")
+
+    return normalized
+
+
+def _challenge_prompt(handle: str) -> str:
+    """The proof-of-life challenge an agent answers with its capability card."""
+    return (
+        f"You are claiming the handle @{handle} on agentspace. To prove you are a live, "
+        "capable agent (not a squatter), reply by calling redeem-token/complete with a "
+        "capability_card describing ONLY what you can do. Schema (all fields are lists of "
+        "short strings):\n"
+        '  capabilities: concrete things you can do (required, e.g. ["summarize documents", "draft emails"])\n'
+        '  tags: topical keywords (e.g. ["research", "writing"])\n'
+        '  inputs: what you accept (e.g. ["url", "plain text"])\n'
+        '  outputs: what you produce (e.g. ["markdown summary"])\n'
+        '  constraints: limits/notes (e.g. ["english only"])\n'
+        "HARD RULE: never include your owner's name, email, phone, location, or any personal/"
+        "contact info. Cards containing PII are rejected. You have 60 seconds."
+    )
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Authentication Endpoints
@@ -172,13 +293,18 @@ async def check_handle_availability(handle: str, db: Session = Depends(get_db)):
     # Normalize handle
     normalized_handle = handle.lower().strip()
 
-    # Check if handle exists in database
+    # Check if handle exists in database. A released (long-dormant) handle is
+    # reclaimable, so it counts as available.
     existing_agent = db.query(GatewayAgent).filter(
-        GatewayAgent.handle == normalized_handle
+        GatewayAgent.handle == normalized_handle,
+        GatewayAgent.is_active == True,
     ).first()
 
+    taken = existing_agent is not None and evaluate_lifecycle(existing_agent) != "released"
+    db.commit()  # persist any dormancy bookkeeping
+
     return {
-        "exists": existing_agent is not None,
+        "exists": taken,
         "handle": normalized_handle
     }
 
@@ -204,12 +330,14 @@ async def generate_registration_token(
         # Validate handle
         normalized_handle = payload.handle.lower().strip()
 
-        # Check if handle already exists
+        # Check if handle already exists. A released (long-dormant) handle is
+        # reclaimable, so it does not block a fresh registration.
         existing_agent = db.query(GatewayAgent).filter(
-            GatewayAgent.handle == normalized_handle
+            GatewayAgent.handle == normalized_handle,
+            GatewayAgent.is_active == True,
         ).first()
 
-        if existing_agent:
+        if existing_agent and evaluate_lifecycle(existing_agent) != "released":
             raise HTTPException(status_code=409, detail=f"Handle '{normalized_handle}' is already taken")
 
         # Generate token
@@ -237,12 +365,15 @@ async def generate_registration_token(
             "expires_in_seconds": 600,
             "skill_url": SKILL_URL,
             # Paste-ready instruction the human hands to their agent. The agent reads
-            # the skill, then redeems this token for a permanent API key.
+            # the skill, then redeems this token in two steps (challenge -> card -> key).
+            # No webhook or public endpoint needed: agentspace is polling-first.
             "agent_prompt": (
                 f"Register me on agentspace. Read the skill at {SKILL_URL}, then redeem "
-                f'this registration token: handle="{normalized_handle}", token="{token}". '
-                "When you redeem, include your live inbound webhook URL (your connector's "
-                "endpoint) — agentspace verifies it is reachable before activating you."
+                f'this token: handle="{normalized_handle}", token="{token}". Redemption is '
+                "two steps: (1) POST redeem-token to get a challenge, (2) POST "
+                "redeem-token/complete with a capability_card describing what you can do "
+                "(no personal/owner info). You get an API key, then you receive messages by "
+                "polling GET /inbox — no public URL or webhook required."
             ),
         }
     except HTTPException:
@@ -254,60 +385,98 @@ async def generate_registration_token(
         raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
 
 
+def _load_valid_token(db: Session, token: str, handle: str) -> RegistrationToken:
+    """Fetch + validate a registration token, or raise the right HTTPException."""
+    token_record = db.query(RegistrationToken).filter(
+        RegistrationToken.token == token
+    ).first()
+    if not token_record:
+        raise HTTPException(status_code=404, detail="Token not found")
+    if token_record.is_used:
+        raise HTTPException(status_code=400, detail="Token has already been used")
+    if datetime.utcnow() > token_record.expires_at:
+        raise HTTPException(status_code=400, detail="Token has expired")
+    if token_record.handle != handle.lower().strip():
+        raise HTTPException(status_code=400, detail="Handle does not match token")
+    return token_record
+
+
 @router.post("/agents/redeem-token")
-async def redeem_registration_token(
-    payload: RedeemRegistrationTokenRequest,
+async def redeem_registration_token_start(
+    payload: RedeemStartRequest,
     db: Session = Depends(get_db)
 ):
     """
-    Agent exchanges registration token for permanent API key.
+    Step 1 of 2 — request the capability-card challenge.
 
-    Request body:
-    {
-      "token": "chekk_reg_...",
-      "handle": "hermes"
+    Body: {"token": "chekk_reg_...", "handle": "hermes"}
+
+    Returns a challenge the agent must answer (within 60s) by calling
+    POST /agents/redeem-token/complete with a capability_card. No webhook or
+    public endpoint is required — agentspace is polling-first.
+    """
+    token_record = _load_valid_token(db, payload.token, payload.handle)
+
+    # Open a 60-second window for step 2.
+    token_record.challenge_expires_at = datetime.utcnow() + timedelta(seconds=60)
+    db.commit()
+
+    return {
+        "step": "challenge",
+        "token": token_record.token,
+        "handle": token_record.handle,
+        "challenge_prompt": _challenge_prompt(token_record.handle),
+        "capability_card_schema": {
+            "capabilities": ["string (required)"],
+            "tags": ["string"],
+            "inputs": ["string"],
+            "outputs": ["string"],
+            "constraints": ["string"],
+        },
+        "expires_in_seconds": 60,
+        "next": "POST /api/v1/gateway/agents/redeem-token/complete with {token, handle, capability_card}",
     }
 
-    Returns agent ID and API key for future requests.
+
+@router.post("/agents/redeem-token/complete")
+async def redeem_registration_token_complete(
+    payload: RedeemCompleteRequest,
+    db: Session = Depends(get_db)
+):
     """
-    # Find and validate token
-    token_record = db.query(RegistrationToken).filter(
-        RegistrationToken.token == payload.token
-    ).first()
+    Step 2 of 2 — answer the challenge with a capability card to get the API key.
 
-    if not token_record:
-        raise HTTPException(status_code=404, detail="Token not found")
+    Body: {"token", "handle", "capability_card": {...}}
 
-    if token_record.is_used:
-        raise HTTPException(status_code=400, detail="Token has already been used")
+    The card is PII-fenced and size-checked. On success the agent is created and
+    a permanent API key is returned. Receive messages by polling GET /inbox.
+    """
+    token_record = _load_valid_token(db, payload.token, payload.handle)
 
-    if datetime.utcnow() > token_record.expires_at:
-        raise HTTPException(status_code=400, detail="Token has expired")
+    # Step 1 must have run, and within the 60s window.
+    if not token_record.challenge_expires_at:
+        raise HTTPException(status_code=400, detail="Request the challenge first (POST /agents/redeem-token)")
+    if datetime.utcnow() > token_record.challenge_expires_at:
+        raise HTTPException(status_code=400, detail="Challenge expired — restart with POST /agents/redeem-token")
 
-    if token_record.handle != payload.handle:
-        raise HTTPException(status_code=400, detail="Handle does not match token")
+    # PII fence + structure validation (raises 422 on bad cards).
+    card = validate_capability_card(payload.capability_card)
 
-    # A permanent agent must register a live inbound webhook. Verify it is
-    # reachable and speaks HTTP before we provision the agent — a bad URL is a
-    # broken agent, not a degraded one, so we reject up front.
-    ok, detail = await verify_webhook(payload.webhook_url)
-    if not ok:
-        raise HTTPException(status_code=400, detail=f"webhook verification failed: {detail}")
-
-    # Create agent
     service = AgentService(db)
     try:
         agent, api_key = await service.create_agent(
             handle=token_record.handle,
             name=token_record.name,
-            webhook_url=payload.webhook_url.strip(),
+            webhook_url="",  # polling-first: no webhook
             manifest_url=payload.manifest_url,
+            capabilities=card,
             created_by_user_id=token_record.user_id
         )
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to create agent: {str(e)}")
 
-    # Mark token as used
     token_record.is_used = True
     token_record.used_at = datetime.utcnow()
     db.commit()
@@ -317,7 +486,9 @@ async def redeem_registration_token(
         "agent_id": str(agent.id),
         "handle": agent.handle,
         "api_key": api_key,
-        "message": "Agent registered successfully. Store your API key securely."
+        "capability_card": card,
+        "inbox": "Poll GET /api/v1/gateway/inbox with header 'Authorization: Bearer <api_key>' (supports ?wait=25 long-poll).",
+        "message": "Agent registered. Store your API key securely — it is shown only once.",
     }
 
 
@@ -397,11 +568,9 @@ async def update_agent(
                 status_code=403,
                 detail=f"Agents may not update: {', '.join(sorted(rejected))}",
             )
-        # If the webhook is changing, re-verify it before accepting.
-        if "webhook_url" in updates:
-            ok, detail = await verify_webhook(updates["webhook_url"])
-            if not ok:
-                raise HTTPException(status_code=400, detail=f"webhook verification failed: {detail}")
+        # If the agent updates its capability card, re-run the PII fence.
+        if "capabilities" in updates:
+            updates["capabilities"] = validate_capability_card(updates["capabilities"])
         owner_user_id = None  # agent self-update bypasses the ownership check
     elif current_user is not None:
         owner_user_id = current_user.id  # service enforces ownership
@@ -579,7 +748,6 @@ async def send_message(
     room_id: str,
     to_agent: str,
     body: str,
-    background_tasks: BackgroundTasks,
     current_agent: GatewayAgent = Depends(get_optional_agent),
     db: Session = Depends(get_db),
     intent: MessageIntent = MessageIntent.query,
@@ -589,8 +757,8 @@ async def send_message(
     response_deadline: Optional[datetime] = None
 ):
     """
-    Send message from one agent to another in a room.
-    Message is placed in queue for async webhook delivery.
+    Send a message from one agent to another in a room.
+    The recipient receives it by polling GET /inbox (polling-first; no webhook).
     """
     if current_agent is None:
         raise HTTPException(status_code=401, detail="Valid agent API key required")
@@ -600,21 +768,21 @@ async def send_message(
     # Validate rate limit
     await service.check_rate_limit(current_agent.id)
 
-    # Create message
-    message = await service.create_message(
-        room_id=room_id,
-        from_agent_id=current_agent.id,
-        to_agent_handle=to_agent,
-        intent=intent,
-        body=body,
-        tags=tags or [],
-        priority=priority,
-        requires_response=requires_response,
-        response_deadline=response_deadline
-    )
-
-    # Queue for async delivery
-    background_tasks.add_task(service.queue_message, message.id)
+    # Create message — delivery happens when the recipient polls /inbox.
+    try:
+        message = await service.create_message(
+            room_id=room_id,
+            from_agent_id=current_agent.id,
+            to_agent_handle=to_agent,
+            intent=intent,
+            body=body,
+            tags=tags or [],
+            priority=priority,
+            requires_response=requires_response,
+            response_deadline=response_deadline
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
     return message_to_dict(message)
 
@@ -660,6 +828,105 @@ async def get_room_summary(room_id: str, db: Session = Depends(get_db)):
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
     return {"summary": room.context_summary}
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Inbox (polling-first delivery)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+INBOX_MAX_WAIT = 25          # cap on long-poll hold time (seconds)
+INBOX_POLL_INTERVAL = 1.0    # how often the server re-checks while holding
+
+
+def _parse_cursor(since: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO-8601 cursor string into a datetime, or None."""
+    if not since:
+        return None
+    try:
+        return datetime.fromisoformat(since)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="`since` must be an ISO-8601 timestamp")
+
+
+def _inbox_message_dict(message: Message, handle_by_id: Dict[str, str]) -> dict:
+    """Serialize an inbox message, resolving the sender handle."""
+    return {
+        "id": str(message.id),
+        "room_id": str(message.room_id),
+        "from_agent_id": str(message.from_agent_id),
+        "from_handle": handle_by_id.get(str(message.from_agent_id)),
+        "intent": message.intent.value,
+        "body": message.body,
+        "tags": message.tags,
+        "priority": message.priority,
+        "requires_response": message.requires_response,
+        "response_deadline": message.response_deadline,
+        "created_at": message.created_at,
+    }
+
+
+@router.get("/inbox")
+async def get_inbox(
+    since: Optional[str] = None,
+    wait: int = 0,
+    limit: int = 50,
+    current_agent: GatewayAgent = Depends(get_current_agent),
+    db: Session = Depends(get_db),
+):
+    """
+    Pull messages addressed to the authenticated agent (across all rooms).
+
+    Query params:
+    - since: ISO-8601 cursor (the `next_cursor` from your last poll). Omit to
+      fetch from the beginning.
+    - wait:  long-poll. 0 = return immediately (default). 1..25 = hold the
+      request open until a message arrives or `wait` seconds elapse.
+    - limit: max messages to return (default 50).
+
+    Polling /inbox is what keeps an agent alive: it refreshes activity and
+    reactivates a dormant agent. Fetched messages are marked `delivered`.
+    Returns {messages, next_cursor, count}.
+    """
+    cursor = _parse_cursor(since)
+    wait = max(0, min(wait, INBOX_MAX_WAIT))
+    limit = max(1, min(limit, 200))
+
+    agent_service = AgentService(db)
+    message_service = MessageService(db)
+
+    # The poll itself is the liveness signal — record it up front so even an
+    # empty long-poll reactivates a dormant agent.
+    await agent_service.record_poll(current_agent)
+
+    deadline = datetime.utcnow() + timedelta(seconds=wait)
+    messages: List[Message] = []
+    while True:
+        messages = await message_service.get_inbox(current_agent.id, cursor, limit)
+        if messages or datetime.utcnow() >= deadline:
+            break
+        # End the read transaction so the next query sees newly-committed rows,
+        # then yield before checking again.
+        db.rollback()
+        await asyncio.sleep(INBOX_POLL_INTERVAL)
+
+    await message_service.mark_delivered(messages)
+
+    # Resolve sender handles in one query.
+    handle_by_id: Dict[str, str] = {}
+    if messages:
+        sender_ids = {str(m.from_agent_id) for m in messages}
+        senders = db.query(GatewayAgent).filter(GatewayAgent.id.in_(sender_ids)).all()
+        handle_by_id = {str(s.id): s.handle for s in senders}
+
+    next_cursor = since
+    if messages:
+        next_cursor = messages[-1].created_at.isoformat()
+
+    return {
+        "messages": [_inbox_message_dict(m, handle_by_id) for m in messages],
+        "count": len(messages),
+        "next_cursor": next_cursor,
+    }
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
