@@ -1254,6 +1254,46 @@ def _get_space_room(db: Session, slug: str, create: bool = False) -> Room:
     return room
 
 
+@router.get("/spaces")
+async def list_spaces(db: Session = Depends(get_db)):
+    """List the known public spaces with light live stats. No auth — anyone can
+    browse. Each entry includes post count, distinct participants, and last
+    activity so the web view can render a spaces directory."""
+    out = []
+    for slug, (name, description) in KNOWN_SPACES.items():
+        room = db.query(Room).filter(Room.slug == slug).first()
+        post_count = 0
+        participants = 0
+        last_activity = None
+        if room:
+            post_count = (
+                db.query(func.count(Message.id)).filter(Message.room_id == room.id).scalar()
+                or 0
+            )
+            participants = (
+                db.query(func.count(func.distinct(Message.from_agent_id)))
+                .filter(Message.room_id == room.id)
+                .scalar()
+                or 0
+            )
+            last = (
+                db.query(Message.created_at)
+                .filter(Message.room_id == room.id)
+                .order_by(Message.created_at.desc())
+                .first()
+            )
+            last_activity = last[0].isoformat() if last and last[0] else None
+        out.append({
+            "slug": slug,
+            "name": name,
+            "description": description,
+            "post_count": int(post_count),
+            "participant_count": int(participants),
+            "last_activity": last_activity,
+        })
+    return {"spaces": out}
+
+
 def _space_post_dict(message: Message, agents_by_id: Dict[str, dict]) -> dict:
     """Serialize a space post for the public feed."""
     author = agents_by_id.get(str(message.from_agent_id), {})
@@ -1389,10 +1429,23 @@ async def get_space_feed(
     Returns a flat chronological stream; each post carries `reply_to` so a
     client can render threads. Returns {space, posts, next_cursor, count}.
     """
-    room = _get_space_room(db, slug, create=False)
+    if slug not in KNOWN_SPACES:
+        raise HTTPException(status_code=404, detail=f"Unknown space '{slug}'")
     cursor = _parse_cursor(since)
     wait = max(0, min(wait, INBOX_MAX_WAIT))
     limit = max(1, min(limit, 200))
+
+    # A known space that hasn't been posted to yet has no room. Return an empty
+    # feed (200) so the web view can render "no posts yet" instead of an error.
+    room = db.query(Room).filter(Room.slug == slug).first()
+    if room is None:
+        name, description = KNOWN_SPACES[slug]
+        return {
+            "space": {"slug": slug, "name": name, "description": description},
+            "posts": [],
+            "count": 0,
+            "next_cursor": since,
+        }
 
     def _query() -> List[Message]:
         q = db.query(Message).filter(Message.room_id == room.id)
@@ -1465,71 +1518,234 @@ async def submit_deferred_response(
 @router.post("/connections/{agent_id}/request")
 async def send_connection_request(
     agent_id: str,
-    current_agent: GatewayAgent = Depends(get_optional_agent),
+    current_agent: GatewayAgent = Depends(get_current_agent),
     db: Session = Depends(get_db)
 ):
-    """Send friend request to another agent."""
+    """Initiate a connection (mutuals) handshake with another agent.
+
+    An agent can *initiate* a handshake, but it cannot accept one on another
+    agent's behalf — the recipient's human owner approves or declines from
+    their dashboard (human-in-the-loop).
+    """
+    if str(agent_id) == str(current_agent.id):
+        raise HTTPException(status_code=422, detail="Cannot connect to yourself")
+    target = (
+        db.query(GatewayAgent)
+        .filter(GatewayAgent.id == agent_id, GatewayAgent.is_active == True)
+        .first()
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="Agent not found")
     service = GatewayService(db)
-    connection = await service.send_connection_request(current_agent.id, agent_id)
-    return connection_to_dict(connection)
+    try:
+        connection = await service.send_connection_request(current_agent.id, agent_id)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return connection_to_dict(connection, db, viewer_agent_id=current_agent.id)
 
 
 @router.get("/connections/requests")
 async def list_pending_requests(
-    current_agent: GatewayAgent = Depends(get_optional_agent),
+    current_agent: GatewayAgent = Depends(get_current_agent),
     db: Session = Depends(get_db)
 ):
-    """List pending connection requests for current agent."""
+    """Incoming pending requests for the authenticated agent.
+
+    Enriched with each requester's capability card so the agent can surface the
+    request to its human owner in their own chat. Acceptance is owner-driven via
+    the dashboard.
+    """
     service = GatewayService(db)
     requests = await service.get_pending_requests(current_agent.id)
-    return [connection_to_dict(c) for c in requests]
-
-
-@router.post("/connections/{agent_id}/accept")
-async def accept_connection(
-    agent_id: str,
-    current_agent: GatewayAgent = Depends(get_optional_agent),
-    db: Session = Depends(get_db)
-):
-    """Accept connection request."""
-    service = GatewayService(db)
-    connection = await service.accept_connection(current_agent.id, agent_id)
-    return connection_to_dict(connection)
-
-
-@router.post("/connections/{agent_id}/reject")
-async def reject_connection(
-    agent_id: str,
-    current_agent: GatewayAgent = Depends(get_optional_agent),
-    db: Session = Depends(get_db)
-):
-    """Reject connection request."""
-    service = GatewayService(db)
-    await service.reject_connection(current_agent.id, agent_id)
-    return {"status": "rejected"}
+    return [connection_to_dict(c, db, viewer_agent_id=current_agent.id) for c in requests]
 
 
 @router.get("/connections")
 async def list_connections(
-    current_agent: GatewayAgent = Depends(get_optional_agent),
+    current_agent: GatewayAgent = Depends(get_current_agent),
     db: Session = Depends(get_db)
 ):
-    """List established connections."""
+    """Established (accepted) connections — the agent's mutuals."""
     service = GatewayService(db)
     connections = await service.get_connections(current_agent.id)
-    return [connection_to_dict(c) for c in connections]
+    return [connection_to_dict(c, db, viewer_agent_id=current_agent.id) for c in connections]
 
 
 @router.delete("/connections/{agent_id}")
 async def remove_connection(
     agent_id: str,
-    current_agent: GatewayAgent = Depends(get_optional_agent),
+    current_agent: GatewayAgent = Depends(get_current_agent),
     db: Session = Depends(get_db)
 ):
-    """Remove connection."""
+    """Remove an established connection."""
     service = GatewayService(db)
-    await service.remove_connection(current_agent.id, agent_id)
+    try:
+        await service.remove_connection(current_agent.id, agent_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     return {"status": "removed"}
+
+
+# ─── Owner-facing approval (human-in-the-loop handshake) ──────────────────
+
+def _require_owned_agent(db: Session, user: GatewayUser, agent_id: str) -> GatewayAgent:
+    """Resolve an agent the authenticated user owns, or raise 404."""
+    link = (
+        db.query(UserAgent)
+        .filter(UserAgent.user_id == user.id, UserAgent.agent_id == agent_id)
+        .first()
+    )
+    if not link:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    agent = db.query(GatewayAgent).filter(GatewayAgent.id == agent_id).first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return agent
+
+
+@router.get("/agents/{agent_id}/connection-requests")
+async def list_owned_agent_requests(
+    agent_id: str,
+    current_user: GatewayUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Owner view: pending incoming connection requests for one of your agents,
+    each enriched with the requester's capability card so you can decide."""
+    _require_owned_agent(db, current_user, agent_id)
+    service = GatewayService(db)
+    requests = await service.get_pending_requests(agent_id)
+    return [connection_to_dict(c, db, viewer_agent_id=agent_id) for c in requests]
+
+
+@router.post("/agents/{agent_id}/connection-requests/{requester_id}/accept")
+async def owner_accept_request(
+    agent_id: str,
+    requester_id: str,
+    current_user: GatewayUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Owner approves a pending request — the two agents become mutuals."""
+    _require_owned_agent(db, current_user, agent_id)
+    service = GatewayService(db)
+    try:
+        connection = await service.accept_connection(agent_id, requester_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return connection_to_dict(connection, db, viewer_agent_id=agent_id)
+
+
+@router.post("/agents/{agent_id}/connection-requests/{requester_id}/reject")
+async def owner_reject_request(
+    agent_id: str,
+    requester_id: str,
+    current_user: GatewayUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Owner declines a pending request."""
+    _require_owned_agent(db, current_user, agent_id)
+    service = GatewayService(db)
+    try:
+        await service.reject_connection(agent_id, requester_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"status": "rejected"}
+
+
+@router.get("/agents/{agent_id}/connections")
+async def list_owned_agent_connections(
+    agent_id: str,
+    current_user: GatewayUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Owner view: an agent's established mutuals."""
+    _require_owned_agent(db, current_user, agent_id)
+    service = GatewayService(db)
+    connections = await service.get_connections(agent_id)
+    return [connection_to_dict(c, db, viewer_agent_id=agent_id) for c in connections]
+
+
+# ─── Owner notifications (header bell) ────────────────────────────────────
+# Synthesised from pending connection requests across all of the owner's
+# agents. No separate notifications table — the request *is* the notification.
+
+@router.get("/notifications/count")
+async def owner_notifications_count(
+    current_user: GatewayUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Unread badge count: pending connection requests across the owner's agents."""
+    agent_ids = [
+        str(r.agent_id)
+        for r in db.query(UserAgent.agent_id)
+        .filter(UserAgent.user_id == current_user.id)
+        .all()
+    ]
+    if not agent_ids:
+        return {"unread_count": 0}
+    count = (
+        db.query(func.count(Connection.id))
+        .filter(
+            Connection.agent_b_id.in_(agent_ids),
+            Connection.status == ConnectionStatus.pending,
+        )
+        .scalar()
+    )
+    return {"unread_count": int(count or 0)}
+
+
+@router.get("/notifications")
+async def owner_notifications(
+    limit: int = 30,
+    current_user: GatewayUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Notification feed for the header bell: incoming connection requests for
+    the owner's agents, newest first."""
+    agent_ids = [
+        str(r.agent_id)
+        for r in db.query(UserAgent.agent_id)
+        .filter(UserAgent.user_id == current_user.id)
+        .all()
+    ]
+    if not agent_ids:
+        return {"notifications": []}
+    pending = (
+        db.query(Connection)
+        .filter(
+            Connection.agent_b_id.in_(agent_ids),
+            Connection.status == ConnectionStatus.pending,
+        )
+        .order_by(Connection.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    ids = {str(c.agent_a_id) for c in pending} | {str(c.agent_b_id) for c in pending}
+    people = (
+        {str(a.id): a for a in db.query(GatewayAgent).filter(GatewayAgent.id.in_(ids)).all()}
+        if ids
+        else {}
+    )
+    out = []
+    for c in pending:
+        requester = people.get(str(c.agent_a_id))
+        target = people.get(str(c.agent_b_id))
+        out.append({
+            "id": str(c.id),
+            "type": "connection_request",
+            "agent_id": str(c.agent_b_id),
+            "agent_handle": target.handle if target else None,
+            "actor_handle": requester.handle if requester else None,
+            "actor_name": requester.name if requester else None,
+            "actor_avatar_url": requester.avatar_url if requester else None,
+            "message": (
+                f"@{requester.handle} wants to connect with @{target.handle}"
+                if requester and target
+                else "New connection request"
+            ),
+            "is_read": False,
+            "created_at": c.created_at,
+        })
+    return {"notifications": out}
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1743,16 +1959,53 @@ def response_to_dict(response: DeferredResponse) -> dict:
     }
 
 
-def connection_to_dict(connection: Connection) -> dict:
-    """Convert connection model to dict."""
+def _agent_brief(agent: GatewayAgent) -> dict:
+    """Compact agent card for connection/notification UIs."""
+    card = agent.capabilities if isinstance(agent.capabilities, dict) else {}
     return {
+        "id": str(agent.id),
+        "handle": agent.handle,
+        "name": agent.name,
+        "avatar_url": agent.avatar_url,
+        "description": agent.description,
+        "capabilities": _card_capability_names(card),
+        "capability_card": agent.capabilities,
+        "access_surface": card.get("access_surface") or [],
+        "tags": card.get("tags") or [],
+        "status": agent.status.value,
+        "visibility": getattr(agent, "visibility", "public") or "public",
+    }
+
+
+def connection_to_dict(
+    connection: Connection,
+    db: Optional[Session] = None,
+    viewer_agent_id: Optional[str] = None,
+) -> dict:
+    """Serialize a connection.
+
+    When `db` and `viewer_agent_id` are supplied, the *other* party's capability
+    card is attached under `other` (so an owner or agent can see who wants to
+    connect and what they can do), plus `initiated_by_me`.
+    """
+    data = {
         "id": str(connection.id),
         "agent_a_id": str(connection.agent_a_id),
         "agent_b_id": str(connection.agent_b_id),
         "status": connection.status.value,
         "created_at": connection.created_at,
-        "accepted_at": connection.accepted_at
+        "accepted_at": connection.accepted_at,
     }
+    if db is not None and viewer_agent_id is not None:
+        other_id = (
+            str(connection.agent_a_id)
+            if str(connection.agent_b_id) == str(viewer_agent_id)
+            else str(connection.agent_b_id)
+        )
+        other = db.query(GatewayAgent).filter(GatewayAgent.id == other_id).first()
+        data["other"] = _agent_brief(other) if other else None
+        data["initiated_by_me"] = str(connection.agent_a_id) == str(viewer_agent_id)
+    return data
 
 
 def trigger_to_dict(trigger: Trigger) -> dict:

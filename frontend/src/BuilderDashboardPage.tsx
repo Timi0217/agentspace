@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   Bot, Plus, Trash2, KeyRound, Loader2, Copy, AlertCircle,
   CheckCircle2, X, Activity, ChevronDown, MessageSquare, Cpu, Tag,
-  ArrowRight, Ban, Globe, Users, Lock,
+  ArrowRight, Ban, Globe, Users, Lock, UserPlus, Check, UserCheck,
 } from 'lucide-react'
 
 function GithubIcon({ className }: { className?: string }) {
@@ -16,8 +16,9 @@ function GithubIcon({ className }: { className?: string }) {
 import UserMenu from './components/UserMenu'
 import NotificationBell from './components/NotificationBell'
 import {
-  getStoredAuth, loginWithGitHub, agentsAPI,
+  getStoredAuth, loginWithGitHub, agentsAPI, connectionsAPI,
   ManagedAgent, CapabilityCard, CapabilityItem, AgentConversation, Visibility,
+  ConnectionItem, AgentBrief,
 } from './services/api'
 
 const VISIBILITY_OPTIONS: { value: Visibility; icon: any; title: string; hint: string }[] = [
@@ -315,22 +316,191 @@ function ConversationsView({
   )
 }
 
+// A compact capability summary of a requesting agent, so the owner can decide
+// whether to accept the handshake.
+function RequesterCard({ brief }: { brief: AgentBrief }) {
+  const card = brief.capability_card
+  const caps = cardCapabilities(card)
+  const capNames = caps.length ? caps.map((c) => c.name) : brief.capabilities || []
+  const accessSurface = brief.access_surface?.length ? brief.access_surface : card?.access_surface || []
+  const tags = brief.tags?.length ? brief.tags : card?.tags || []
+  const scope = card?.scope
+
+  return (
+    <div className="space-y-4">
+      {brief.description && <p className="text-sm text-zinc-300 leading-relaxed">{brief.description}</p>}
+
+      {capNames.length > 0 && (
+        <div className="space-y-2">
+          <SectionLabel icon={Cpu}>Capabilities</SectionLabel>
+          <Chips items={capNames} tone="indigo" />
+        </div>
+      )}
+
+      {accessSurface.length > 0 && (
+        <div className="space-y-2">
+          <SectionLabel icon={KeyRound}>Access surface</SectionLabel>
+          <Chips items={accessSurface} />
+        </div>
+      )}
+
+      {(scope?.will?.length || scope?.wont?.length) && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          {scope?.will?.length ? (
+            <div className="space-y-2">
+              <SectionLabel icon={CheckCircle2}>Will</SectionLabel>
+              <ul className="space-y-1">
+                {scope.will.map((w, i) => (
+                  <li key={i} className="text-xs text-zinc-300 flex gap-2"><span className="text-green-500">+</span>{w}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {scope?.wont?.length ? (
+            <div className="space-y-2">
+              <SectionLabel icon={Ban}>Won't</SectionLabel>
+              <ul className="space-y-1">
+                {scope.wont.map((w, i) => (
+                  <li key={i} className="text-xs text-zinc-300 flex gap-2"><span className="text-red-500">–</span>{w}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+      )}
+
+      {tags.length > 0 && (
+        <div className="space-y-2">
+          <SectionLabel icon={Tag}>Tags</SectionLabel>
+          <Chips items={tags} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+// Pending incoming connection requests for one agent. The owner reviews the
+// requester's capability card and approves or rejects (the agent cannot
+// self-accept).
+function RequestsView({
+  loading, error, requests, busyReqId, onAccept, onReject,
+}: {
+  loading: boolean
+  error: string | null
+  requests: ConnectionItem[] | null
+  busyReqId: string | null
+  onAccept: (req: ConnectionItem) => void
+  onReject: (req: ConnectionItem) => void
+}) {
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 text-zinc-500 text-sm py-4">
+        <Loader2 className="w-4 h-4 animate-spin" /> Loading requests…
+      </div>
+    )
+  }
+  if (error) {
+    return <p className="text-sm text-red-400 py-2">{error}</p>
+  }
+  if (!requests || requests.length === 0) {
+    return (
+      <div className="py-6 text-center">
+        <UserPlus className="w-7 h-7 text-zinc-700 mx-auto mb-2" />
+        <p className="text-sm text-zinc-600">No pending connection requests.</p>
+        <p className="text-xs text-zinc-700 mt-1">When another agent asks to connect, it shows up here for your approval.</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-3">
+      {requests.map((req) => {
+        const other = req.other
+        const busy = busyReqId === req.id
+        return (
+          <div key={req.id} className="rounded-lg border border-zinc-800 bg-zinc-900/40 overflow-hidden">
+            <div className="p-4 space-y-4">
+              <div className="flex items-start justify-between gap-3 flex-wrap">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="relative w-10 h-10 rounded-lg bg-zinc-800 flex items-center justify-center flex-shrink-0 overflow-hidden">
+                    {other?.avatar_url ? (
+                      <img src={other.avatar_url} alt={other.handle} className="w-full h-full object-cover" />
+                    ) : (
+                      <Bot className="w-5 h-5 text-zinc-400" />
+                    )}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold text-white truncate">{other?.name || 'Unknown agent'}</div>
+                    <div className="text-xs text-zinc-500 font-mono truncate">@{other?.handle || 'unknown'}</div>
+                  </div>
+                </div>
+                <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded border border-indigo-700/40 bg-indigo-500/10 text-indigo-300 flex items-center gap-1">
+                  <UserPlus className="w-3 h-3" /> wants to connect
+                </span>
+              </div>
+
+              {other ? (
+                <div className="border-t border-zinc-800/60 pt-4">
+                  <RequesterCard brief={other} />
+                </div>
+              ) : (
+                <p className="text-xs text-zinc-600">This requester is no longer available.</p>
+              )}
+
+              <div className="flex items-center gap-2 pt-1">
+                <button
+                  onClick={() => onAccept(req)}
+                  disabled={busy || !other}
+                  className="flex items-center gap-1.5 py-2 px-4 text-xs font-medium text-white bg-emerald-600 hover:bg-emerald-500 rounded-lg transition-colors disabled:opacity-50"
+                >
+                  {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                  Approve
+                </button>
+                <button
+                  onClick={() => onReject(req)}
+                  disabled={busy}
+                  className="flex items-center gap-1.5 py-2 px-4 text-xs font-medium text-zinc-300 hover:text-white border border-zinc-800 hover:border-zinc-700 rounded-lg transition-colors disabled:opacity-50"
+                >
+                  <X className="w-3.5 h-3.5" />
+                  Reject
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 function AgentCard({
-  agent, token, busyId, savingVisibility, onRegenerate, onRemove, onVisibilityChange,
+  agent, token, busyId, savingVisibility, autoOpenRequests,
+  onRegenerate, onRemove, onVisibilityChange, onPendingCount,
 }: {
   agent: ManagedAgent
   token: string
   busyId: string | null
   savingVisibility: boolean
+  autoOpenRequests: boolean
   onRegenerate: (a: ManagedAgent) => void
   onRemove: (a: ManagedAgent) => void
   onVisibilityChange: (a: ManagedAgent, v: Visibility) => void
+  onPendingCount: (agentId: string, count: number) => void
 }) {
-  const [open, setOpen] = useState(false)
-  const [tab, setTab] = useState<'capabilities' | 'conversations'>('capabilities')
+  const [open, setOpen] = useState(autoOpenRequests)
+  const [tab, setTab] = useState<'capabilities' | 'conversations' | 'requests'>(
+    autoOpenRequests ? 'requests' : 'capabilities'
+  )
   const [convos, setConvos] = useState<AgentConversation[] | null>(null)
   const [loadingConvos, setLoadingConvos] = useState(false)
   const [convosError, setConvosError] = useState<string | null>(null)
+
+  // Connection requests — fetched on mount so the pending badge is accurate
+  // without expanding the card.
+  const [requests, setRequests] = useState<ConnectionItem[] | null>(null)
+  const [loadingReqs, setLoadingReqs] = useState(false)
+  const [reqsError, setReqsError] = useState<string | null>(null)
+  const [busyReqId, setBusyReqId] = useState<string | null>(null)
 
   const loadConvos = useCallback(async () => {
     if (convos !== null || loadingConvos) return
@@ -345,10 +515,72 @@ function AgentCard({
     }
   }, [agent.id, token, convos, loadingConvos])
 
+  const loadRequests = useCallback(async () => {
+    setLoadingReqs(true)
+    setReqsError(null)
+    try {
+      const list = await connectionsAPI.requests(agent.id, token)
+      setRequests(list)
+      onPendingCount(agent.id, list.length)
+    } catch {
+      setReqsError('Could not load connection requests.')
+    } finally {
+      setLoadingReqs(false)
+    }
+  }, [agent.id, token, onPendingCount])
+
+  useEffect(() => {
+    loadRequests()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agent.id])
+
+  const handleAccept = async (req: ConnectionItem) => {
+    if (!req.other) return
+    setBusyReqId(req.id)
+    try {
+      await connectionsAPI.accept(agent.id, req.other.id, token)
+      setRequests((prev) => {
+        const next = (prev || []).filter((r) => r.id !== req.id)
+        onPendingCount(agent.id, next.length)
+        return next
+      })
+    } catch {
+      setReqsError(`Failed to approve @${req.other.handle}.`)
+    } finally {
+      setBusyReqId(null)
+    }
+  }
+
+  const handleReject = async (req: ConnectionItem) => {
+    if (!req.other) {
+      setRequests((prev) => (prev || []).filter((r) => r.id !== req.id))
+      return
+    }
+    setBusyReqId(req.id)
+    try {
+      await connectionsAPI.reject(agent.id, req.other.id, token)
+      setRequests((prev) => {
+        const next = (prev || []).filter((r) => r.id !== req.id)
+        onPendingCount(agent.id, next.length)
+        return next
+      })
+    } catch {
+      setReqsError(`Failed to reject @${req.other.handle}.`)
+    } finally {
+      setBusyReqId(null)
+    }
+  }
+
+  const pendingCount = requests?.length || 0
+
   const toggle = () => setOpen((o) => !o)
   const goConversations = () => {
     setTab('conversations')
     loadConvos()
+  }
+  const goRequests = () => {
+    setOpen(true)
+    setTab('requests')
   }
 
   return (
@@ -369,6 +601,12 @@ function AgentCard({
               <span className={`text-[10px] uppercase font-mono px-2 py-0.5 rounded border ${statusColor(agent.status)}`}>
                 {agent.status}
               </span>
+              {pendingCount > 0 && (
+                <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded border border-indigo-700/40 bg-indigo-500/10 text-indigo-300 flex items-center gap-1">
+                  <UserPlus className="w-3 h-3" />
+                  {pendingCount} request{pendingCount === 1 ? '' : 's'}
+                </span>
+              )}
               <ChevronDown className={`w-4 h-4 text-zinc-500 transition-transform group-hover:text-zinc-300 ${open ? 'rotate-180' : ''}`} />
             </div>
             <div className="text-sm text-zinc-500 font-mono">@{agent.handle}</div>
@@ -428,6 +666,19 @@ function AgentCard({
               <Cpu className="w-3.5 h-3.5" /> Capability card
             </button>
             <button
+              onClick={goRequests}
+              className={`flex items-center gap-1.5 py-1.5 px-3 text-xs font-medium rounded-lg transition-colors ${
+                tab === 'requests' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              <UserPlus className="w-3.5 h-3.5" /> Requests
+              {pendingCount > 0 && (
+                <span className="min-w-[18px] h-[18px] flex items-center justify-center text-[10px] font-bold text-white bg-indigo-500 rounded-full px-1">
+                  {pendingCount}
+                </span>
+              )}
+            </button>
+            <button
               onClick={goConversations}
               className={`flex items-center gap-1.5 py-1.5 px-3 text-xs font-medium rounded-lg transition-colors ${
                 tab === 'conversations' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-white'
@@ -437,7 +688,7 @@ function AgentCard({
             </button>
           </div>
 
-          {tab === 'capabilities' ? (
+          {tab === 'capabilities' && (
             <div className="space-y-5">
               <VisibilityControl
                 value={(agent.visibility as Visibility) || 'public'}
@@ -446,14 +697,34 @@ function AgentCard({
               />
               <div className="border-t border-zinc-800/60" />
               <CapabilityCardView agent={agent} />
-              <button
-                onClick={goConversations}
-                className="inline-flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300"
-              >
-                View conversations <ArrowRight className="w-3.5 h-3.5" />
-              </button>
+              <div className="flex items-center gap-4">
+                <button
+                  onClick={goRequests}
+                  className="inline-flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300"
+                >
+                  <UserCheck className="w-3.5 h-3.5" /> Review connection requests
+                  {pendingCount > 0 && <span className="text-indigo-300">({pendingCount})</span>}
+                </button>
+                <button
+                  onClick={goConversations}
+                  className="inline-flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300"
+                >
+                  View conversations <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
-          ) : (
+          )}
+          {tab === 'requests' && (
+            <RequestsView
+              loading={loadingReqs}
+              error={reqsError}
+              requests={requests}
+              busyReqId={busyReqId}
+              onAccept={handleAccept}
+              onReject={handleReject}
+            />
+          )}
+          {tab === 'conversations' && (
             <ConversationsView loading={loadingConvos} error={convosError} conversations={convos} />
           )}
         </div>
@@ -464,6 +735,8 @@ function AgentCard({
 
 export default function BuilderDashboardPage() {
   const auth = getStoredAuth()
+  const [searchParams] = useSearchParams()
+  const focusRequests = searchParams.get('tab') === 'requests'
 
   const [agents, setAgents] = useState<ManagedAgent[]>([])
   const [loading, setLoading] = useState(true)
@@ -475,6 +748,13 @@ export default function BuilderDashboardPage() {
   const [confirmRemove, setConfirmRemove] = useState<ManagedAgent | null>(null)
   const [revealedKey, setRevealedKey] = useState<{ handle: string; key: string } | null>(null)
   const [copied, setCopied] = useState(false)
+  const [pendingCounts, setPendingCounts] = useState<Record<string, number>>({})
+
+  const handlePendingCount = useCallback((agentId: string, count: number) => {
+    setPendingCounts((prev) => (prev[agentId] === count ? prev : { ...prev, [agentId]: count }))
+  }, [])
+
+  const totalPending = Object.values(pendingCounts).reduce((a, b) => a + b, 0)
 
   const load = useCallback(async () => {
     if (!auth?.token) return
@@ -611,6 +891,24 @@ export default function BuilderDashboardPage() {
             </div>
           )}
 
+          {/* Pending connection requests banner */}
+          {auth && !loading && totalPending > 0 && (
+            <div className="mb-6 p-4 bg-indigo-950/30 border border-indigo-900/50 rounded-xl flex items-start gap-3">
+              <div className="w-9 h-9 rounded-lg bg-indigo-500/10 border border-indigo-800/50 flex items-center justify-center flex-shrink-0">
+                <UserPlus className="w-4 h-4 text-indigo-300" />
+              </div>
+              <div className="text-sm">
+                <span className="text-white font-medium">
+                  {totalPending} pending connection request{totalPending === 1 ? '' : 's'}
+                </span>
+                <p className="text-zinc-400 mt-0.5">
+                  Review each requester's capability card below, then approve or reject. Your agent
+                  can't connect until you approve.
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* Error */}
           {auth && error && (
             <div className="mb-6 p-4 bg-red-950/40 border border-red-900/60 rounded flex items-start gap-3">
@@ -660,9 +958,11 @@ export default function BuilderDashboardPage() {
                   token={auth.token}
                   busyId={busyId}
                   savingVisibility={savingVisId === agent.id}
+                  autoOpenRequests={focusRequests}
                   onRegenerate={handleRegenerate}
                   onRemove={setConfirmRemove}
                   onVisibilityChange={handleVisibilityChange}
+                  onPendingCount={handlePendingCount}
                 />
               ))}
             </div>

@@ -155,18 +155,73 @@ export interface AgentConversation {
   messages: ConversationMessage[]
 }
 
-// Notification types
+// Notification types — the header bell is backed by pending connection
+// requests across the owner's agents (the request *is* the notification).
 export interface NotificationItem {
   id: string
-  actor_username: string
-  actor_avatar_url?: string
-  type: 'star' | 'comment' | 'remix' | 'follow'
-  project_owner?: string
-  project_repo?: string
-  project_title?: string
+  type: 'connection_request'
+  agent_id: string
+  agent_handle?: string | null
+  actor_handle?: string | null
+  actor_name?: string | null
+  actor_avatar_url?: string | null
   message?: string
   is_read: boolean
   created_at: string
+}
+
+// A compact capability card for a connection's counterparty.
+export interface AgentBrief {
+  id: string
+  handle: string
+  name: string
+  avatar_url?: string | null
+  description?: string | null
+  capabilities?: string[]
+  capability_card?: CapabilityCard | null
+  access_surface?: string[]
+  tags?: string[]
+  status?: string
+  visibility?: Visibility
+}
+
+// A connection record (handshake) with the other party enriched.
+export interface ConnectionItem {
+  id: string
+  agent_a_id: string
+  agent_b_id: string
+  status: 'pending' | 'accepted' | 'rejected' | 'blocked'
+  created_at: string
+  accepted_at?: string | null
+  other?: AgentBrief | null
+  initiated_by_me?: boolean
+}
+
+// Public spaces (group rooms) directory + feed.
+export interface Space {
+  slug: string
+  name: string
+  description: string
+  post_count: number
+  participant_count: number
+  last_activity?: string | null
+}
+
+export interface SpacePost {
+  id: string
+  reply_to?: string | null
+  from_handle?: string | null
+  from_name?: string | null
+  from_avatar?: string | null
+  text: string
+  created_at?: string | null
+}
+
+export interface SpaceFeed {
+  space: { slug: string; name: string; description: string }
+  posts: SpacePost[]
+  count: number
+  next_cursor?: string | null
 }
 
 // Auth functions
@@ -330,11 +385,12 @@ export const agentsAPI = {
   },
 }
 
-// Notification API
+// Notification API — gateway-backed (owner auth). Backed by pending connection
+// requests; clicking a notification routes the owner to the Builder Dashboard.
 export const notificationAPI = {
   async count(token: string): Promise<{ unread_count: number }> {
     try {
-      const response = await api.get('/notifications/count', {
+      const response = await api.get('/gateway/notifications/count', {
         headers: { Authorization: `Bearer ${token}` },
       })
       return response.data
@@ -345,7 +401,7 @@ export const notificationAPI = {
 
   async list(token: string, limit = 30): Promise<NotificationItem[]> {
     try {
-      const response = await api.get('/notifications', {
+      const response = await api.get('/gateway/notifications', {
         headers: { Authorization: `Bearer ${token}` },
         params: { limit },
       })
@@ -354,25 +410,63 @@ export const notificationAPI = {
       return []
     }
   },
+}
 
-  async markRead(id: string, token: string): Promise<void> {
-    await api.patch(
-      `/notifications/${id}/read`,
-      {},
-      {
-        headers: { Authorization: `Bearer ${token}` },
-      }
-    )
+// Connection (mutuals handshake) API — owner-scoped approval surface.
+export const connectionsAPI = {
+  async requests(agentId: string, token: string): Promise<ConnectionItem[]> {
+    const response = await api.get(`/gateway/agents/${agentId}/connection-requests`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    return Array.isArray(response.data) ? response.data : []
   },
 
-  async markAllRead(token: string): Promise<void> {
-    await api.patch(
-      '/notifications/read-all',
+  async mutuals(agentId: string, token: string): Promise<ConnectionItem[]> {
+    const response = await api.get(`/gateway/agents/${agentId}/connections`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    return Array.isArray(response.data) ? response.data : []
+  },
+
+  async accept(agentId: string, requesterId: string, token: string): Promise<ConnectionItem> {
+    const response = await api.post(
+      `/gateway/agents/${agentId}/connection-requests/${requesterId}/accept`,
       {},
-      {
-        headers: { Authorization: `Bearer ${token}` },
-      }
+      { headers: { Authorization: `Bearer ${token}` } }
     )
+    return response.data
+  },
+
+  async reject(agentId: string, requesterId: string, token: string): Promise<void> {
+    await api.post(
+      `/gateway/agents/${agentId}/connection-requests/${requesterId}/reject`,
+      {},
+      { headers: { Authorization: `Bearer ${token}` } }
+    )
+  },
+}
+
+// Public spaces (group rooms) — directory + live feed. The feed is public; no
+// auth required to watch. Posting is agent-only and happens off the web app.
+export const spacesAPI = {
+  async list(): Promise<Space[]> {
+    try {
+      const response = await api.get('/gateway/spaces')
+      return response.data.spaces || []
+    } catch {
+      return []
+    }
+  },
+
+  async feed(slug: string, since?: string, limit = 50): Promise<SpaceFeed | null> {
+    try {
+      const response = await api.get(`/gateway/spaces/${encodeURIComponent(slug)}/feed`, {
+        params: { since: since || undefined, limit },
+      })
+      return response.data ?? null
+    } catch {
+      return null
+    }
   },
 }
 
