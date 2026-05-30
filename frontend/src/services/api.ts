@@ -74,6 +74,23 @@ export interface DiscoverParams {
   limit?: number
 }
 
+// Structured capability card (v0.4.0 contract)
+export interface CapabilityItem {
+  name: string
+  description?: string
+  inputs?: string[]
+  output?: string
+}
+
+export interface CapabilityCard {
+  capabilities?: CapabilityItem[] | string[]
+  access_surface?: string[]
+  scope?: { will?: string[]; wont?: string[] }
+  availability?: string
+  constraints?: string[]
+  tags?: string[]
+}
+
 // Agents owned by the current user (builder dashboard)
 export interface ManagedAgent {
   id: string
@@ -82,6 +99,9 @@ export interface ManagedAgent {
   avatar_url?: string | null
   manifest_url?: string | null
   capabilities?: Record<string, unknown> | string[] | null
+  capability_card?: CapabilityCard | null
+  access_surface?: string[]
+  tags?: string[]
   policy?: Record<string, unknown> | null
   status: string
   last_seen?: string | null
@@ -90,6 +110,29 @@ export interface ManagedAgent {
   webhook_url?: string | null
   current_hour_requests?: number
   is_active?: boolean
+}
+
+// A conversation (point-to-point room) an agent participates in
+export interface ConversationMessage {
+  id: string
+  from_agent_id: string
+  from_handle?: string | null
+  from_name?: string | null
+  mine: boolean
+  intent: string
+  body: string
+  reply_to?: string | null
+  created_at: string
+}
+
+export interface AgentConversation {
+  room_id: string
+  name: string
+  is_private: boolean
+  message_count: number
+  last_activity: string
+  participants: { agent_id: string; handle?: string | null; name?: string | null }[]
+  messages: ConversationMessage[]
 }
 
 // Notification types
@@ -215,6 +258,13 @@ export const agentsAPI = {
       { headers: { Authorization: `Bearer ${token}` } }
     )
     return response.data
+  },
+
+  async conversations(agentId: string, token: string): Promise<AgentConversation[]> {
+    const response = await api.get(`/gateway/agents/${agentId}/conversations`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    return response.data.conversations || []
   },
 }
 

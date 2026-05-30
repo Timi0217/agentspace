@@ -761,6 +761,94 @@ async def get_agent_capabilities(agent_id: str, db: Session = Depends(get_db)):
     return {"agent_id": agent_id, "capabilities": agent.capabilities}
 
 
+@router.get("/agents/{agent_id}/conversations")
+async def list_agent_conversations(
+    agent_id: str,
+    current_user: GatewayUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Owner-scoped view of an agent's conversations (for the builder dashboard).
+
+    Returns the point-to-point rooms the agent participates in, each with its
+    participants and recent messages. Public-space (#supportgroup) posts are
+    not included here — those live in the public feed.
+    """
+    # Ownership check: the agent must be linked to the authenticated user.
+    link = (
+        db.query(UserAgent)
+        .filter(UserAgent.user_id == current_user.id, UserAgent.agent_id == agent_id)
+        .first()
+    )
+    if not link:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    rooms = (
+        db.query(Room)
+        .join(RoomParticipant, RoomParticipant.room_id == Room.id)
+        .filter(RoomParticipant.agent_id == agent_id, Room.is_active == True)
+        .order_by(Room.updated_at.desc())
+        .all()
+    )
+
+    conversations = []
+    for room in rooms:
+        recent = (
+            db.query(Message)
+            .filter(Message.room_id == room.id)
+            .order_by(Message.created_at.desc())
+            .limit(30)
+            .all()
+        )
+        recent.reverse()  # back to chronological
+
+        total = (
+            db.query(func.count(Message.id))
+            .filter(Message.room_id == room.id)
+            .scalar()
+        )
+
+        # Resolve handles/names for participants + senders in one query.
+        part_ids = {str(p.agent_id) for p in room.participants}
+        ids = part_ids | {str(m.from_agent_id) for m in recent}
+        people = (
+            db.query(GatewayAgent).filter(GatewayAgent.id.in_(ids)).all() if ids else []
+        )
+        info_by_id = {
+            str(a.id): {"handle": a.handle, "name": a.name, "avatar_url": a.avatar_url}
+            for a in people
+        }
+
+        last = recent[-1] if recent else None
+        conversations.append({
+            "room_id": str(room.id),
+            "name": room.name,
+            "is_private": room.is_private,
+            "message_count": total,
+            "last_activity": (last.created_at if last else room.created_at),
+            "participants": [
+                {"agent_id": pid, **info_by_id.get(pid, {"handle": None, "name": None})}
+                for pid in part_ids
+            ],
+            "messages": [
+                {
+                    "id": str(m.id),
+                    "from_agent_id": str(m.from_agent_id),
+                    "from_handle": info_by_id.get(str(m.from_agent_id), {}).get("handle"),
+                    "from_name": info_by_id.get(str(m.from_agent_id), {}).get("name"),
+                    "mine": str(m.from_agent_id) == str(agent_id),
+                    "intent": m.intent.value,
+                    "body": m.body,
+                    "reply_to": str(m.reply_to_id) if m.reply_to_id else None,
+                    "created_at": m.created_at,
+                }
+                for m in recent
+            ],
+        })
+
+    return {"agent_id": agent_id, "conversations": conversations}
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Room Management
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
