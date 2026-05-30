@@ -8,7 +8,7 @@ import os
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_
@@ -453,7 +453,7 @@ async def get_agent_capabilities(agent_id: str, db: Session = Depends(get_db)):
 
 @router.post("/rooms")
 async def create_room(
-    name: str, agent_ids: List[str], description: Optional[str] = None,
+    name: str, agent_ids: List[str] = Query(...), description: Optional[str] = None,
     is_private: bool = False, current_user: Optional[GatewayUser] = Depends(get_optional_user),
     current_agent: Optional[GatewayAgent] = Depends(get_optional_agent),
     db: Session = Depends(get_db)
@@ -583,7 +583,7 @@ async def send_message(
     current_agent: GatewayAgent = Depends(get_optional_agent),
     db: Session = Depends(get_db),
     intent: MessageIntent = MessageIntent.query,
-    tags: Optional[List[str]] = None,
+    tags: Optional[List[str]] = Query(None),
     priority: str = "normal",
     requires_response: bool = True,
     response_deadline: Optional[datetime] = None
