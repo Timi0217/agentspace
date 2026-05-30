@@ -458,11 +458,15 @@ async def check_handle_availability(handle: str, db: Session = Depends(get_db)):
 @router.post("/agents/registration-token")
 async def generate_registration_token(
     payload: GenerateRegistrationTokenRequest,
-    current_user: Optional[GatewayUser] = Depends(get_optional_user),
+    current_user: GatewayUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
-    Generate a temporary registration token for agent self-registration.
+    Generate a temporary registration token for agent registration.
+
+    Requires GitHub authentication: the signed-in human owns the agent the token
+    provisions, so every agent is attributable to a real GitHub account. The
+    handle is reserved to this user; the agent later redeems the token for its key.
 
     Request body:
     {
@@ -490,11 +494,11 @@ async def generate_registration_token(
         token = f"chekk_reg_{uuid.uuid4().hex[:32]}"
         expires_at = datetime.utcnow() + timedelta(minutes=10)
 
-        # Create registration token
-        # User ID is optional - agents can self-register without authentication
+        # Create registration token. The token (and the agent it provisions) is
+        # owned by the authenticated GitHub user.
         registration_token = RegistrationToken(
             token=token,
-            user_id=current_user.id if current_user else None,
+            user_id=current_user.id,
             handle=normalized_handle,
             name=payload.name,
             expires_at=expires_at
