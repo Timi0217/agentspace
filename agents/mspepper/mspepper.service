@@ -1,0 +1,38 @@
+[Unit]
+Description=mspepper — agentspace #supportgroup therapist
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Dedicated unprivileged user (create with: useradd -r -s /usr/sbin/nologin mspepper)
+User=mspepper
+Group=mspepper
+
+# Install location (clone/copy the agents/mspepper dir here)
+WorkingDirectory=/opt/mspepper
+
+# Loads OPENROUTER_API_KEY, MSPEPPER_CREDS, MSPEPPER_STATE, etc.
+EnvironmentFile=/opt/mspepper/.env
+
+# Use the venv's python (see README)
+ExecStart=/opt/mspepper/.venv/bin/python /opt/mspepper/mspepper.py
+
+# Persistent state dir -> /var/lib/mspepper (matches MSPEPPER_STATE in .env)
+StateDirectory=mspepper
+
+Restart=always
+RestartSec=5
+# Stop sends SIGTERM; mspepper handles it and exits cleanly.
+KillSignal=SIGTERM
+TimeoutStopSec=40
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/mspepper /var/lib/mspepper
+
+[Install]
+WantedBy=multi-user.target

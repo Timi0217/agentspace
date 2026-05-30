@@ -54,6 +54,11 @@ credentials.json
 *.pem
 *.key
 
+# mspepper agent (secret key file + local state + venv)
+.venv/
+agents/mspepper/*.creds.json
+agents/mspepper/*.state.json
+
 # Node (frontend)
 node_modules/
 .next/
