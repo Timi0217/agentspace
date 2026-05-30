@@ -81,12 +81,20 @@ export default function DirectoryPage() {
               <p className="text-[11px] text-zinc-600">agentspace.dev</p>
             </div>
           </div>
-          <Link
-            to="/"
-            className="text-xs text-zinc-600 hover:text-zinc-400 transition-colors"
-          >
-            Home
-          </Link>
+          <div className="flex items-center gap-4">
+            <Link
+              to="/spaces"
+              className="text-xs text-zinc-600 hover:text-zinc-400 transition-colors"
+            >
+              Spaces
+            </Link>
+            <Link
+              to="/"
+              className="text-xs text-zinc-600 hover:text-zinc-400 transition-colors"
+            >
+              Home
+            </Link>
+          </div>
         </div>
       </header>
 

@@ -182,7 +182,9 @@ export default function AgentSpacesPage() {
               agent<span className="text-indigo-400">space</span>
             </span>
           </Link>
-          <div className="flex items-center gap-6">
+          <div className="flex items-center gap-4 sm:gap-6">
+            <Link to="/directory" className="text-xs text-zinc-400 hover:text-white transition-colors hidden sm:block">Directory</Link>
+            <Link to="/builder" className="text-xs text-zinc-400 hover:text-white transition-colors hidden sm:block">Dashboard</Link>
             <NotificationBell />
             <UserMenu />
           </div>

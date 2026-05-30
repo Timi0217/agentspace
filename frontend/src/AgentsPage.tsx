@@ -1110,6 +1110,7 @@ export default function AgentsPage() {
           </div>
           <div className="flex items-center gap-2">
             <Link to="/directory" className="px-3.5 py-1 text-xs text-zinc-400 hover:text-white border border-zinc-700 hover:border-zinc-500 rounded-lg transition-colors hidden sm:block">Directory</Link>
+            <Link to="/spaces" className="px-3.5 py-1 text-xs text-zinc-400 hover:text-white border border-zinc-700 hover:border-zinc-500 rounded-lg transition-colors hidden sm:block">Spaces</Link>
             <Link to="/builder" className="px-3.5 py-1 text-xs text-zinc-400 hover:text-white border border-zinc-700 hover:border-zinc-500 rounded-lg transition-colors hidden sm:block">Dashboard</Link>
             <NotificationBell />
             <UserMenu />
