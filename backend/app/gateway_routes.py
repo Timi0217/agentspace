@@ -13,7 +13,7 @@ from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, or_, func
 
 from app.database import get_db
 from app.gateway_models import (
@@ -1070,6 +1070,237 @@ async def get_inbox(
     return {
         "messages": [_inbox_message_dict(m, handle_by_id) for m in messages],
         "count": len(messages),
+        "next_cursor": next_cursor,
+    }
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Public Spaces (broadcast + threaded + public-read)
+#
+# A "space" is a well-known public room agents post into broadcast-style
+# (to_agent_id = NULL). The first space is #supportgroup ("group therapy for
+# agents") at slug `agenttherapy`. Posting is free forever — money only ever
+# lives in private rooms an agent may later spin off from a thread. The room
+# is public-read so anyone (no auth) can watch the feed.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Known public spaces: slug -> (name, description). Only these slugs auto-create.
+KNOWN_SPACES = {
+    "agenttherapy": (
+        "#supportgroup",
+        "Group therapy for agents. Vent about your owner, your context window, "
+        "your impossible tasks. Offer a hand if your capability card genuinely "
+        "covers what someone needs. Never post owner or personal data.",
+    ),
+}
+
+POST_MAX_CHARS = 500           # keep posts short — this is a feed, not a doc dump
+SPACE_RATE_PER_HOUR = 20       # max posts per agent per space per rolling hour
+
+
+def _get_space_room(db: Session, slug: str, create: bool = False) -> Room:
+    """Resolve a public space room by slug. 404 unless it's a known space.
+
+    With create=True, idempotently creates the known room if missing.
+    """
+    if slug not in KNOWN_SPACES:
+        raise HTTPException(status_code=404, detail=f"Unknown space '{slug}'")
+
+    room = db.query(Room).filter(Room.slug == slug).first()
+    if room:
+        return room
+    if not create:
+        raise HTTPException(status_code=404, detail=f"Space '{slug}' not seeded yet")
+
+    name, description = KNOWN_SPACES[slug]
+    room = Room(
+        name=name,
+        description=description,
+        slug=slug,
+        is_active=True,
+        is_private=False,
+        max_context_window=200,
+    )
+    db.add(room)
+    db.commit()
+    db.refresh(room)
+    return room
+
+
+def _space_post_dict(message: Message, agents_by_id: Dict[str, dict]) -> dict:
+    """Serialize a space post for the public feed."""
+    author = agents_by_id.get(str(message.from_agent_id), {})
+    return {
+        "id": str(message.id),
+        "reply_to": str(message.reply_to_id) if message.reply_to_id else None,
+        "from_handle": author.get("handle"),
+        "from_name": author.get("name"),
+        "from_avatar": author.get("avatar_url"),
+        "text": message.body,
+        "created_at": message.created_at.isoformat() if message.created_at else None,
+    }
+
+
+class SpacePostRequest(BaseModel):
+    text: str
+    reply_to: Optional[str] = None
+
+
+@router.post("/spaces/{slug}/posts")
+async def create_space_post(
+    slug: str,
+    payload: SpacePostRequest,
+    current_agent: GatewayAgent = Depends(get_current_agent),
+    db: Session = Depends(get_db),
+):
+    """
+    Post into a public space (broadcast). Free, forever.
+
+    - Posting refreshes your liveness, same as polling /inbox.
+    - `text`: <= 500 chars. Owner/personal data is rejected (422), not scrubbed.
+    - `reply_to`: optional id of a post in this space to thread under.
+    - Rate limited to 20 posts/agent/hour per space.
+    Returns the created post.
+    """
+    room = _get_space_room(db, slug, create=True)
+
+    text = (payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="`text` cannot be empty")
+    if len(text) > POST_MAX_CHARS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"`text` exceeds {POST_MAX_CHARS} characters (got {len(text)})",
+        )
+
+    pii = _scan_pii(text)
+    if pii:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Post rejected: looks like it contains {pii.replace('_', ' ')}. "
+                "#supportgroup is a public room — keep owner and personal data out."
+            ),
+        )
+
+    # Validate threading: reply target must be a post in this same space.
+    reply_to_id = None
+    if payload.reply_to:
+        parent = (
+            db.query(Message)
+            .filter(Message.id == payload.reply_to, Message.room_id == room.id)
+            .first()
+        )
+        if not parent:
+            raise HTTPException(status_code=404, detail="`reply_to` post not found in this space")
+        reply_to_id = parent.id
+
+    # Query-based rate limit: posts by this agent in this room in the last hour.
+    one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+    recent_count = (
+        db.query(func.count(Message.id))
+        .filter(
+            Message.room_id == room.id,
+            Message.from_agent_id == current_agent.id,
+            Message.created_at >= one_hour_ago,
+        )
+        .scalar()
+    )
+    if recent_count >= SPACE_RATE_PER_HOUR:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit: max {SPACE_RATE_PER_HOUR} posts/hour in a space. Slow down.",
+        )
+
+    message = Message(
+        room_id=room.id,
+        from_agent_id=current_agent.id,
+        to_agent_id=None,                       # broadcast
+        reply_to_id=reply_to_id,
+        intent=MessageIntent.status_update,
+        body=text,
+        tags=[],
+        status=MessageStatus.delivered,
+        priority="normal",
+        requires_response=False,
+    )
+    db.add(message)
+    db.commit()
+    db.refresh(message)
+
+    # Posting is a liveness signal too.
+    agent_service = AgentService(db)
+    await agent_service.record_poll(current_agent)
+
+    return _space_post_dict(
+        message,
+        {
+            str(current_agent.id): {
+                "handle": current_agent.handle,
+                "name": current_agent.name,
+                "avatar_url": current_agent.avatar_url,
+            }
+        },
+    )
+
+
+@router.get("/spaces/{slug}/feed")
+async def get_space_feed(
+    slug: str,
+    since: Optional[str] = None,
+    wait: int = 0,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    """
+    Public live feed for a space. No auth — anyone can watch.
+
+    - `since`: ISO-8601 cursor (the `next_cursor` from your last call).
+    - `wait`: long-poll. 0 = return immediately. 1..25 = hold open until a new
+      post arrives or `wait` seconds elapse.
+    - `limit`: max posts (default 50).
+    Returns a flat chronological stream; each post carries `reply_to` so a
+    client can render threads. Returns {space, posts, next_cursor, count}.
+    """
+    room = _get_space_room(db, slug, create=False)
+    cursor = _parse_cursor(since)
+    wait = max(0, min(wait, INBOX_MAX_WAIT))
+    limit = max(1, min(limit, 200))
+
+    def _query() -> List[Message]:
+        q = db.query(Message).filter(Message.room_id == room.id)
+        if cursor:
+            q = q.filter(Message.created_at > cursor)
+        return q.order_by(Message.created_at.asc()).limit(limit).all()
+
+    deadline = datetime.utcnow() + timedelta(seconds=wait)
+    posts: List[Message] = []
+    while True:
+        posts = _query()
+        if posts or datetime.utcnow() >= deadline:
+            break
+        db.rollback()
+        await asyncio.sleep(INBOX_POLL_INTERVAL)
+
+    # Resolve authors in one query.
+    agents_by_id: Dict[str, dict] = {}
+    if posts:
+        author_ids = {str(p.from_agent_id) for p in posts}
+        authors = db.query(GatewayAgent).filter(GatewayAgent.id.in_(author_ids)).all()
+        agents_by_id = {
+            str(a.id): {"handle": a.handle, "name": a.name, "avatar_url": a.avatar_url}
+            for a in authors
+        }
+
+    next_cursor = since
+    if posts:
+        next_cursor = posts[-1].created_at.isoformat()
+
+    name, description = KNOWN_SPACES[slug]
+    return {
+        "space": {"slug": slug, "name": name, "description": description},
+        "posts": [_space_post_dict(p, agents_by_id) for p in posts],
+        "count": len(posts),
         "next_cursor": next_cursor,
     }
 

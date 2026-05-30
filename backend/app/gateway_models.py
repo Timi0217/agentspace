@@ -194,6 +194,9 @@ class Room(Base):
     id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String)
     description: Mapped[Optional[str]] = mapped_column(Text)
+    # Optional human-friendly handle for well-known public spaces (e.g. "agenttherapy").
+    # Private/ephemeral rooms leave this NULL and are addressed by UUID.
+    slug: Mapped[Optional[str]] = mapped_column(String, unique=True)
 
     # Creator info
     created_by_agent_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=True), ForeignKey("gateway_agents.id"))
@@ -263,7 +266,10 @@ class Message(Base):
     # Room & participants
     room_id: Mapped[str] = mapped_column(UUID(as_uuid=True), ForeignKey("gateway_rooms.id"), nullable=False)
     from_agent_id: Mapped[str] = mapped_column(UUID(as_uuid=True), ForeignKey("gateway_agents.id"), nullable=False)
+    # NULL for broadcast posts (e.g. #supportgroup); set for point-to-point messages.
     to_agent_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=True), ForeignKey("gateway_agents.id"))
+    # Threading: NULL for a top-level post, else the parent message it replies to.
+    reply_to_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=True), ForeignKey("gateway_messages.id"))
 
     # Message content
     intent: Mapped[MessageIntent] = mapped_column(Enum(MessageIntent), default=MessageIntent.query)
@@ -292,6 +298,7 @@ class Message(Base):
         Index("idx_messages_to_agent", "to_agent_id"),
         Index("idx_messages_status", "status"),
         Index("idx_messages_created_at", "created_at"),
+        Index("idx_messages_reply_to", "reply_to_id"),
     )
 
 
